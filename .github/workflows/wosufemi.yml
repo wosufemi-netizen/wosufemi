@@ -1,0 +1,73 @@
+name: wosufemi
+
+on:
+  schedule:
+    - cron: '58 11-13 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install playwright && playwright install --with-deps chromium
+
+      # Capture: selalu tulis wosufemi/capture_status.json (ok/gagal).
+      # Jangan biarkan step gagal mematikan notify — pakai continue-on-error.
+      - name: Capture m3u8
+        id: capture
+        continue-on-error: true
+        run: python m3u8_capture.py
+
+      - name: Show capture status
+        if: always()
+        run: |
+          echo "=== capture_status.json ==="
+          cat wosufemi/capture_status.json 2>/dev/null || echo "(missing)"
+          echo "=== live_url.txt ==="
+          cat wosufemi/live_url.txt 2>/dev/null || echo "(missing)"
+          if [ -f wosufemi/capture_status.json ]; then
+            python3 -c "import json; d=json.load(open('wosufemi/capture_status.json')); print('fresh=', d.get('fresh'), 'ok=', d.get('ok'), 'reason=', d.get('reason'))"
+          fi
+
+      # Notify SELALU jalan: bedakan FRESH vs STALE di pesan Telegram.
+      - name: Notify Telegram (FRESH/STALE)
+        if: always()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python telegram_notify.py
+
+      # Commit cuma kalau capture sukses (status.ok) + file berubah
+      - name: Commit refresh (hanya kalau FRESH)
+        if: always()
+        run: |
+          if [ ! -f wosufemi/capture_status.json ]; then
+            echo "no status — skip commit"
+            exit 0
+          fi
+          OK=$(python3 -c "import json; print(json.load(open('wosufemi/capture_status.json')).get('ok', False))")
+          if [ "$OK" != "True" ]; then
+            echo "capture STALE/gagal — jangan commit live_url lama sebagai refresh"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add wosufemi/captured.m3u8 wosufemi/live_url.txt wosufemi/capture_status.json telegram_notify.py m3u8_capture.py
+          git diff --cached --quiet || git commit -m "chore: refresh live url [skip ci]" && git push
+
+      # Fail job kalau capture gagal (biar GHA merah), setelah notify.
+      - name: Fail if capture not fresh
+        if: always()
+        run: |
+          if [ ! -f wosufemi/capture_status.json ]; then
+            echo "missing capture_status.json"
+            exit 1
+          fi
+          python3 -c "import json,sys; d=json.load(open('wosufemi/capture_status.json')); sys.exit(0 if d.get('ok') else 1)"
