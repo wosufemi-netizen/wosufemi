@@ -17,7 +17,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from playwright.sync_api import sync_playwright
 
@@ -29,10 +29,12 @@ OUT = os.path.join(OUT_DIR, "captured.m3u8")
 LIVE_URL = os.path.join(OUT_DIR, "live_url.txt")
 STATUS_FILE = os.path.join(OUT_DIR, "capture_status.json")
 PRIORITY = ["720", "480", "240"]
+WIB = timezone(timedelta(hours=7))
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # WIB (UTC+7) — contoh: 2026-07-23T17:58:56+07:00
+    return datetime.now(WIB).strftime("%Y-%m-%dT%H:%M:%S+07:00")
 
 
 def write_status(ok: bool, reason: str = "", url: str = "", res: str = "") -> None:
@@ -122,7 +124,7 @@ def main():
     print(f"[+] variant ditemukan: {len(variants)} -> pilih: {chosen[:120]}")
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    ts = datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S WIB")
     full = [
         "#EXTM3U",
         f"# capture-from: {PLAYER_URL}",
