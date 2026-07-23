@@ -1,0 +1,10 @@
+#EXTM3U
+# capture-from: https://geo.dailymotion.com/player/x15a7g.html?video=x8qckyq
+# generated: 2026-07-17 08:30:11
+
+#EXTM3U
+#EXT-X-STREAM-INF:RESOLUTION=320x180,FRAME-RATE=25.000000,BANDWIDTH=475136,CODECS="avc1.42000c,mp4a.40.5",NAME="240"
+https://live.eu-north-1a.cf.dmcdn.net/sec2(vmuL7UkF8ES4964XmT3Jz4HVRAUG4YVutGNBfIHW5Yl6kGgy83zg_spNMkmxeZ0hmJKQa416w63KBIKsDzPZbR3cgdBh3oLA65ZvOqVH37CusQBvM2VrUozFpilTL-lL)/dm/3/x8qckyq/d/live-240.m3u8#cell=lcf-eu-north-1a
+
+# variant-url (token sekali-pakai, lihat di atas):
+#   https://live.eu-north-1a.cf.dmcdn.net/sec2(vmuL7UkF8ES4964XmT3Jz4HVRAUG4YVutGNBfIHW5Yl6kGgy83zg_spNMkmxeZ0hmJKQa416w63KBIKsDzPZbR3cgdBh3oLA65ZvOqVH37CusQBvM2VrUozFpilTL-lL)/dm/3/x8qckyq/d/live-240.m3u8#cell=lcf-eu-north-1a
