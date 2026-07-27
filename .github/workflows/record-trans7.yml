@@ -107,7 +107,7 @@ jobs:
           PROGRESS_FILE: /tmp/rec_progress
         run: python3 scripts/rec_progress.py
 
- + thumbnail
+      # Step 5: Extract metadata + thumbnail
       - name: Extract metadata
         id: meta
         if: steps.record.outputs.recorded == 'true'
