@@ -244,7 +244,68 @@ jobs:
           path: Trans7-*.mp4
           retention-days: 3
 
-      # Step 9: Encode HEVC 10-bit
+      # Step 8b: Release + .txt (metadata + m3u8 + .ts URLs)
+      - name: Create release with .txt
+        if: steps.record.outputs.recorded == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          FILE="${{ steps.record.outputs.output }}"
+          TAG="trans7-$(date +%s)"
+          TITLE="Trans7 — $(date '+%Y-%m-%d %H:%M:%S') WIB (${{ env.DURATION }}s)"
+          TOKEN_URL="${{ steps.token.outputs.url }}"
+          CHUNK_URL="${{ steps.chunklist.outputs.chunk_url }}"
+
+          # Fetch chunklist → ambil semua .ts URLs
+          TS_LIST_FILE=$(mktemp)
+          if [ -n "$CHUNK_URL" ]; then
+            CHUNK_BODY=$(curl -s \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              -H "Referer: https://20.detik.com/" \
+              "$CHUNK_URL")
+            BASE=$(echo "$CHUNK_URL" | sed 's|/[^/]*$||')
+            echo "$CHUNK_BODY" | grep -E '\.ts' | while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              case "$line" in \#*) continue ;; esac
+              case "$line" in
+                http*) echo "$line" ;;
+                *) echo "${BASE}/${line}" ;;
+              esac
+            done > "$TS_LIST_FILE"
+          fi
+          TS_COUNT=$(wc -l < "$TS_LIST_FILE" | tr -d ' ')
+
+          # Buat .txt
+          TXT="${FILE%.mp4}.txt"
+          {
+            echo "# trans7 — record update"
+            echo "file: ${FILE}"
+            echo "size: ${{ env.FILE_SIZE }}"
+            echo "durasi: ${{ env.REAL_DURATION }}"
+            echo "resolusi: ${{ env.RESOLUTION }}"
+            echo "codec: ${{ env.VCODEC }}"
+            echo "bitrate: ${{ env.VBITRATE }}"
+            echo "master_url: ${TOKEN_URL}"
+            echo "chunklist_url: ${CHUNK_URL}"
+            echo "ts_count: ${TS_COUNT}"
+            echo "recorded_at: $(date '+%Y-%m-%dT%H:%M:%S %z')"
+            echo ""
+            echo "# all .ts segment URLs (snapshot at record time)"
+            if [ -s "$TS_LIST_FILE" ]; then
+              cat "$TS_LIST_FILE"
+            else
+              echo "# (no .ts resolved)"
+            fi
+          } > "$TXT"
+          rm -f "$TS_LIST_FILE"
+
+          NOTES="Trans7 auto-record. Token generated in GHA (pure Python). Video sent to Telegram."
+          gh release create "$TAG" --repo "${{ github.repository }}" \
+            --title "$TITLE" --notes "$NOTES" \
+            "$TXT" || echo "⚠️ Release gagal"
+          echo "✅ Release $TAG: $(ls -lh "$TXT" | awk '{print $5}')"
+
+
       - name: Encode to HEVC 10-bit
         id: hevc
         if: always() && steps.record.outputs.recorded == 'true'
