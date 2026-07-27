@@ -4,6 +4,7 @@
  * Payload: m3u8_url, duration, chat_id, human_duration, duration_label, referer
  */
 const ALLOWED_USER_ID = 2027652715;
+const KNOWN_CHANNELS = ["trans7", "transtv", "cnn", "moji", "cnbc"];
 
 export default {
   async scheduled(event, env, ctx) {
@@ -123,8 +124,8 @@ export default {
         return new Response("OK");
       }
 
-      if (text.startsWith("/trans7")) {
-        ctx.waitUntil(handleTrans7(env, chatId, text));
+      if (text.startsWith("/trans7") || text.startsWith("/transtv") || text.startsWith("/cnn")) {
+        ctx.waitUntil(handleChannel(env, chatId, text));
         return new Response("OK");
       }
 
@@ -247,7 +248,7 @@ async function handleRecord(env, chatId, text) {
   }
 }
 
-async function handleTrans7(env, chatId, text) {
+async function handleChannel(env, chatId, text) {
   // /trans7 [duration] — default 5m (300s)
   const parts = text.split(/\s+/).filter(Boolean);
   let durationSec = 300;
@@ -287,7 +288,7 @@ async function handleTrans7(env, chatId, text) {
     event_type: "record-trans7",
     client_payload: {
       duration: String(durationSec),
-      stream_type: "trans7",
+      stream_type: channel,
       chat_id: String(chatId),
     },
   };
