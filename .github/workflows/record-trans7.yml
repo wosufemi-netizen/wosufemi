@@ -29,7 +29,7 @@ permissions:
 jobs:
   record:
     runs-on: ubuntu-latest
-    timeout-minutes: 198
+    timeout-minutes: ${{ (github.event.inputs.duration || github.event.client_payload.duration || 300) / 60 + 31 }}
     env:
       TZ: Asia/Jakarta
 
