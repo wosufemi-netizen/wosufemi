@@ -110,7 +110,7 @@ jobs:
           [ $(((DUR%3600)/60)) -gt 0 ] && DM="$(((DUR%3600)/60))m"
           DL="${DH}${DM}"
           [ -z "$DL" ] && DL="${DUR}s"
-          OUT="Trans7-Asset-${NOW}-${DL}.mp4"
+          OUT="Wosufemi-Asset-${NOW}-${DL}.mp4"
 
           echo "Recording ${DUR}s from Trans7..."
           ffmpeg -y \
@@ -251,7 +251,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: trans7-recording-${{ github.run_number }}
-          path: Trans7-Asset-*.mp4
+          path: Wosufemi-Asset-*.mp4
           retention-days: 3
 
       # Step 8b: Release + .txt (metadata + m3u8 + .ts URLs)
