@@ -97,7 +97,7 @@ jobs:
       # Step 4: Record with ffmpeg (with live Telegram progress)
       - name: Record stream
         id: record
-        if: steps.chunklist.outputs.chunk_url != ""
+        if: steps.chunklist.outputs.chunk_url != ''
         env:
           M3U8_URL: ${{ steps.token.outputs.url }}
           CHUNK_URL: ${{ steps.chunklist.outputs.chunk_url }}
