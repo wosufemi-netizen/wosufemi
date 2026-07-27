@@ -1,0 +1,160 @@
+name: Record Trans7
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Recording duration in seconds"
+        required: false
+        default: "300"
+      type:
+        description: "Stream type (trans7/transtv/cnn)"
+        required: false
+        default: "trans7"
+
+env:
+  STREAM_TYPE: ${{ github.event.inputs.type || 'trans7' }}
+  DURATION: ${{ github.event.inputs.duration || '300' }}
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      # Step 1: Generate fresh token — no browser needed
+      - name: Generate Wowza token
+        id: token
+        run: |
+          python scripts/gen_trans7_token.py
+          TOKEN_URL=$(grep '^TOKEN_URL=' trans7_url.txt | cut -d= -f2-)
+          echo "url=$TOKEN_URL" >> "$GITHUB_OUTPUT"
+          EXPIRE=$(grep '^EXPIRE_AT=' trans7_url.txt | cut -d= -f2-)
+          echo "expire=$EXPIRE" >> "$GITHUB_OUTPUT"
+          echo "::notice::Token URL generated, expires at $EXPIRE"
+
+      # Step 2: Verify playlist is reachable
+      - name: Verify playlist
+        id: verify
+        run: |
+          URL="${{ steps.token.outputs.url }}"
+          echo "Testing: ${URL:0:80}..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
+            -H "Referer: https://20.detik.com/" \
+            -H "Origin: https://20.detik.com" \
+            "$URL")
+          echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
+          echo "::notice::Playlist HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Playlist returned $HTTP_CODE — stream may be off-air or IP blocked"
+            # Try to get response body for debugging
+            curl -s -D- \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              -H "Referer: https://20.detik.com/" \
+              "$URL" | head -30
+            exit 1
+          fi
+
+      # Step 3: Parse chunklist from master playlist
+      - name: Get chunklist URL
+        id: chunklist
+        if: steps.verify.outputs.http_code == '200'
+        run: |
+          URL="${{ steps.token.outputs.url }}"
+          PLAYLIST=$(curl -s \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            -H "Referer: https://20.detik.com/" \
+            "$URL")
+          echo "--- Master Playlist ---"
+          echo "$PLAYLIST"
+          # Extract first variant (chunklist) URL
+          CHUNK=$(echo "$PLAYLIST" | grep -v '^#' | grep -v '^$' | head -1)
+          if [ -z "$CHUNK" ]; then
+            echo "::error::No chunklist found in master playlist"
+            exit 1
+          fi
+          # Make absolute if relative
+          if [[ "$CHUNK" != http* ]]; then
+            BASE=$(echo "$URL" | sed 's|/[^/]*$||')
+            CHUNK="${BASE}/${CHUNK}"
+          fi
+          echo "chunk_url=$CHUNK" >> "$GITHUB_OUTPUT"
+          echo "::notice::Chunklist URL: ${CHUNK:0:100}"
+
+      # Step 4: Record with ffmpeg
+      - name: Record stream
+        if: steps.chunklist.outputs.chunk_url != ''
+        run: |
+          URL="${{ steps.token.outputs.url }}"
+          DURATION="${{ env.DURATION }}"
+          OUTPUT="trans7_${STREAM_TYPE}_$(date +%Y%m%d_%H%M%S).mp4"
+
+          echo "Recording $DURATION seconds from Trans7..."
+          echo "Master URL: ${URL:0:100}"
+          echo "Output: $OUTPUT"
+
+          ffmpeg -y \
+            -user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
+            -headers "Referer: https://20.detik.com/\r\nOrigin: https://20.detik.com\r\n" \
+            -i "$URL" \
+            -t "$DURATION" \
+            -c copy \
+            -movflags +faststart \
+            "$OUTPUT" 2>&1 || {
+              echo "::error::ffmpeg recording failed"
+              # Try with chunklist directly
+              CHUNK="${{ steps.chunklist.outputs.chunk_url }}"
+              echo "Retrying with chunklist: ${CHUNK:0:100}"
+              ffmpeg -y \
+                -user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                -headers "Referer: https://20.detik.com/\r\n" \
+                -i "$CHUNK" \
+                -t "$DURATION" \
+                -c copy \
+                -movflags +faststart \
+                "$OUTPUT" 2>&1
+            }
+
+          ls -lh "$OUTPUT" 2>/dev/null && echo "recorded=true" >> "$GITHUB_OUTPUT" || echo "recorded=false" >> "$GITHUB_OUTPUT"
+          echo "output=$OUTPUT" >> "$GITHUB_OUTPUT"
+
+      # Step 5: Upload artifact
+      - name: Upload recording
+        if: steps.record.outputs.recorded == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: trans7-recording-${{ github.run_number }}
+          path: trans7_*.mp4
+          retention-days: 3
+
+      # Step 6: Notify Telegram (optional — set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID as repo secrets)
+      - name: Notify Telegram
+        if: always() && env.TELEGRAM_BOT_TOKEN != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RECORD_STATUS: ${{ steps.verify.outputs.http_code }}
+        run: |
+          if [ "$RECORD_STATUS" = "200" ] && [ "${{ steps.record.outputs.recorded }}" = "true" ]; then
+            MSG="✅ Trans7 recorded: ${{ steps.record.outputs.output }} (${DURATION}s)"
+          elif [ "$RECORD_STATUS" = "200" ]; then
+            MSG="⚠️ Trans7 token OK (200) but ffmpeg failed"
+          else
+            MSG="❌ Trans7 record failed — HTTP $RECORD_STATUS (stream off-air or IP blocked)"
+          fi
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="$MSG" \
+            -d parse_mode=HTML || true
