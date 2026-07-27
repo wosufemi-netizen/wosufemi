@@ -241,10 +241,115 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: trans7-recording-${{ github.run_number }}
-          path: trans7_*.mp4
+          path: Trans7-*.mp4
           retention-days: 3
 
-      # Step 9: Notify fallback (kalau Bot API Server gagal)
+      # Step 9: Encode HEVC 10-bit
+      - name: Encode to HEVC 10-bit
+        id: hevc
+        if: always() && steps.record.outputs.recorded == 'true'
+        continue-on-error: true
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ env.CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
+          FILENAME: ${{ steps.record.outputs.output }}
+          DURATION_SEC: ${{ env.DURATION }}
+          TG_API_URL: "http://localhost:8081"
+        run: |
+          FILE="${{ steps.record.outputs.output }}"
+          HEVC_FILE="${FILE%.mp4}-h265-10bit.mp4"
+          SRC_DUR_INT="${DURATION_SEC:-60}"
+          [ "$SRC_DUR_INT" -le 0 ] && SRC_DUR_INT=60
+
+          echo "🎞 Encoding HEVC 10-bit (main10, yuv420p10le, CRF 28)..."
+
+          # Progress bar
+          CHAT_ID="$CHAT_ID" FILENAME="$FILE" TG_API_URL="$TG_API_URL" \
+            BOT_TOKEN="$BOT_TOKEN" PROGRESS_MSG_FILE=/tmp/trans7_hevc_progress \
+            python3 scripts/progress.py start || true
+
+          LAST_PCT=-1; NEXT_SEND=0
+          ffmpeg -hide_banner -y -i "$FILE" \
+            -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le \
+            -crf 28 -preset fast -tag:v hvc1 \
+            -c:a copy \
+            -progress pipe:1 \
+            "$HEVC_FILE" 2>/dev/null | while IFS='=' read -r k v; do
+            if [ "$k" = "out_time_ms" ]; then
+              ms=${v%.*}
+              [ "$ms" -gt 0 ] 2>/dev/null || continue
+              cur=$(( ms / 1000000 ))
+              pct=$(( (cur * 100) / SRC_DUR_INT ))
+              [ "$pct" -gt 100 ] && pct=100
+              now=$(date +%s)
+              if [ "$pct" -ge "$((LAST_PCT + 10))" ] && [ "$now" -ge "$NEXT_SEND" ]; then
+                LAST_PCT=$(( (pct / 10) * 10 ))
+                NEXT_SEND=$(( now + 5 ))
+                echo "🔄 HEVC encode ${LAST_PCT}%"
+                CHAT_ID="$CHAT_ID" FILENAME="$FILE" TG_API_URL="$TG_API_URL" \
+                  BOT_TOKEN="$BOT_TOKEN" PROGRESS_MSG_FILE=/tmp/trans7_hevc_progress \
+                  python3 scripts/progress.py progress "$LAST_PCT" || true
+              fi
+            fi
+          done
+
+          CHAT_ID="$CHAT_ID" FILENAME="$FILE" TG_API_URL="$TG_API_URL" \
+            BOT_TOKEN="$BOT_TOKEN" PROGRESS_MSG_FILE=/tmp/trans7_hevc_progress \
+            python3 scripts/progress.py done || true
+
+          if [ -s "$HEVC_FILE" ]; then
+            HEVC_SIZE=$(ls -lh "$HEVC_FILE" | awk '{print $5}')
+            echo "✅ HEVC 10-bit: $HEVC_SIZE"
+            echo "HEVC_FILE=$HEVC_FILE" >> $GITHUB_ENV
+            echo "HEVC_SIZE=$HEVC_SIZE" >> $GITHUB_ENV
+            # Metadata
+            HDUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$HEVC_FILE" 2>/dev/null | head -1)
+            HDUR_INT=${HDUR%.*}; [ -z "$HDUR_INT" ] && HDUR_INT=0
+            echo "HEVC_DUR=$(printf '%02d:%02d:%02d' $((HDUR_INT/3600)) $(((HDUR_INT%3600)/60)) $((HDUR_INT%60)))" >> $GITHUB_ENV
+            HW=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of default=noprint_wrappers=1:nokey=1 "$HEVC_FILE" 2>/dev/null | head -1)
+            HH=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of default=noprint_wrappers=1:nokey=1 "$HEVC_FILE" 2>/dev/null | head -1)
+            [ -n "$HW" ] && [ -n "$HH" ] && echo "HEVC_RES=${HW}x${HH}" >> $GITHUB_ENV
+            HBR=$(ffprobe -v error -show_entries format=bit_rate -of default=noprint_wrappers=1:nokey=1 "$HEVC_FILE" 2>/dev/null | head -1)
+            case "$HBR" in ''|*[!0-9]*) ;; *) echo "HEVC_VBITRATE=$(awk "BEGIN{printf \"%.1f Mbps\", ${HBR}/1000000}")" >> $GITHUB_ENV ;; esac
+            # Thumbnail HEVC
+            HEVC_THUMB="${HEVC_FILE%.mp4}.jpg"
+            HSEEK=1; [ "$HDUR_INT" -gt 6 ] && HSEEK=$((HDUR_INT / 2))
+            ffmpeg -hide_banner -loglevel error -y -ss "$HSEEK" -i "$HEVC_FILE" \
+              -frames:v 1 -q:v 2 -vf "scale=640:-2" "$HEVC_THUMB" 2>/dev/null || true
+            [ -s "$HEVC_THUMB" ] && echo "HEVC_THUMB_FILE=$HEVC_THUMB" >> $GITHUB_ENV && echo "HAS_HEVC_THUMB=1" >> $GITHUB_ENV || echo "HAS_HEVC_THUMB=0" >> $GITHUB_ENV
+          else
+            echo "⚠️ HEVC encode gagal"
+          fi
+
+      # Step 10: Notify Telegram — HEVC
+      - name: Notify Telegram — HEVC 10-bit
+        if: always() && steps.hevc.outputs.hevc_file != ''
+        continue-on-error: true
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ env.CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
+          FILENAME: ${{ steps.record.outputs.output }}
+          JOB_STATUS: success
+          REAL_DURATION: ${{ env.REAL_DURATION }}
+          RESOLUTION: ${{ env.RESOLUTION }}
+          VCODEC: ${{ env.VCODEC }}
+          VBITRATE: ${{ env.VBITRATE }}
+          FILE_SIZE: ${{ env.FILE_SIZE }}
+          THUMB_FILE: ${{ env.THUMB_FILE }}
+          HAS_THUMB: ${{ env.HAS_THUMB }}
+          HEVC_FILE: ${{ env.HEVC_FILE }}
+          HEVC_SIZE: ${{ env.HEVC_SIZE }}
+          HEVC_RES: ${{ env.HEVC_RES }}
+          HEVC_VCODEC: hevc
+          HEVC_VBITRATE: ${{ env.HEVC_VBITRATE }}
+          HEVC_DUR: ${{ env.HEVC_DUR }}
+          HEVC_THUMB_FILE: ${{ env.HEVC_THUMB_FILE }}
+          HAS_HEVC_THUMB: ${{ env.HAS_HEVC_THUMB }}
+          TG_API_URL: "http://localhost:8081"
+          PHASE: hevc
+        run: python3 scripts/notify.py
+
+      # Step 11: Notify fallback (kalau Bot API Server gagal)
       - name: Notify Telegram — fallback text
         if: always()
         env:
@@ -255,7 +360,11 @@ jobs:
           OUTFILE: ${{ steps.record.outputs.output }}
         run: |
           [ -z "$TELEGRAM_BOT_TOKEN" ] && exit 0
-          [ "$RECORDED" = "true" ] && exit 0  # sudah dikirim via notify.py
+          # Skip kalau video sudah dikirim via notify.py
+          if [ "$RECORDED" = "true" ]; then
+            echo "Video sudah dikirim via notify.py — skip fallback"
+            exit 0
+          fi
           if [ "$HTTP" = "200" ]; then
             MSG="⚠️ Trans7 token OK tapi rekaman gagal"
           else
