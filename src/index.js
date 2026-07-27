@@ -57,6 +57,9 @@ export default {
               "🎬 <b>wosufemi / wosufemi-netizen</b>",
               "",
               "Perintah:",
+              "• <code>/trans7 [durasi]</code>",
+              "  Rekam Trans7 live (auto generate token)",
+              "  contoh: <code>/trans7 5m</code> atau <code>/trans7 300</code>",
               "• <code>/record &lt;m3u8_url&gt; [detik]</code>",
               "  contoh: <code>/record https://.../index.m3u8 300</code>",
               "• <code>/status</code> — info singkat",
@@ -94,6 +97,11 @@ export default {
             "ℹ️ Cancel job lewat GitHub Actions (Cancel workflow). Bot tidak kill runner remote."
           )
         );
+        return new Response("OK");
+      }
+
+      if (text.startsWith("/trans7")) {
+        ctx.waitUntil(handleTrans7(env, chatId, text));
         return new Response("OK");
       }
 
@@ -202,6 +210,86 @@ async function handleRecord(env, chatId, text) {
         env,
         chatId,
         "✅ Request dikirim ke GitHub Actions. Pantau progress di chat / Actions."
+      );
+    } else {
+      const body = await res.text();
+      await tgSend(
+        env,
+        chatId,
+        `❌ GitHub dispatch gagal HTTP ${res.status}\n<pre>${escapeHtml(body.slice(0, 500))}</pre>`
+      );
+    }
+  } catch (e) {
+    await tgSend(env, chatId, `❌ Dispatch error: ${escapeHtml(String(e.message || e))}`);
+  }
+}
+
+async function handleTrans7(env, chatId, text) {
+  // /trans7 [duration] — default 5m (300s)
+  const parts = text.split(/\s+/).filter(Boolean);
+  let durationSec = 300;
+  if (parts[1]) {
+    const n = parseDuration(parts[1]);
+    if (!n || n < 30 || n > 6 * 3600) {
+      await tgSend(
+        env,
+        chatId,
+        "❌ Durasi invalid. Pakai detik (30–21600) atau format 5m / 1h30m."
+      );
+      return;
+    }
+    durationSec = n;
+  }
+
+  const human = humanDuration(durationSec);
+
+  if (!env.BOT_TOKEN || !env.GH_TOKEN || !env.GH_OWNER || !env.GH_REPO) {
+    await tgSend(env, chatId, "❌ Worker secrets belum lengkap.");
+    return;
+  }
+
+  await tgSend(
+    env,
+    chatId,
+    [
+      "⏳ <b>Dispatch Trans7 record</b>",
+      `Durasi: <b>${human}</b> (${durationSec}s)`,
+      `Repo: <code>${env.GH_OWNER}/${env.GH_REPO}</code>`,
+      "",
+      "Token akan di-generate otomatis di GHA.",
+    ].join("\n")
+  );
+
+  const payload = {
+    event_type: "record-trans7",
+    client_payload: {
+      duration: String(durationSec),
+      stream_type: "trans7",
+      chat_id: String(chatId),
+    },
+  };
+
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${env.GH_OWNER}/${env.GH_REPO}/dispatches`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.GH_TOKEN}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "wosufemi-worker",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      }
+    );
+
+    if (res.status === 204 || res.ok) {
+      await tgSend(
+        env,
+        chatId,
+        `✅ Trans7 dispatch berhasil. Rekaman <b>${human}</b> dimulai. Pantau di chat ini.`
       );
     } else {
       const body = await res.text();

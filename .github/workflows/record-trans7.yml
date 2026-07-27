@@ -11,10 +11,12 @@ on:
         description: "Stream type (trans7/transtv/cnn)"
         required: false
         default: "trans7"
+  repository_dispatch:
+    types: [record-trans7]
 
 env:
-  STREAM_TYPE: ${{ github.event.inputs.type || 'trans7' }}
-  DURATION: ${{ github.event.inputs.duration || '300' }}
+  STREAM_TYPE: ${{ github.event.inputs.type || github.event.client_payload.stream_type || 'trans7' }}
+  DURATION: ${{ github.event.inputs.duration || github.event.client_payload.duration || '300' }}
 
 jobs:
   record:
