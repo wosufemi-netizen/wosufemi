@@ -1,10 +1,10 @@
 #EXTM3U
 # capture-from: https://geo.dailymotion.com/player/x15a7g.html?video=x8qckyq
-# generated: 2026-07-26 22:47:54 WIB
+# generated: 2026-07-27 18:58:52 WIB
 
 #EXTM3U
 #EXT-X-STREAM-INF:RESOLUTION=320x180,FRAME-RATE=25.000000,BANDWIDTH=475136,CODECS="avc1.42000c,mp4a.40.5",NAME="240"
-https://live.eu-north-1b.cf.dmcdn.net/sec2(V01TP0OnAddDgtpihyMfbQKZ4_-7wswMI30ZXoJxL77g2snLwMVsKOYK90JxBSJV5Iw527mb4NTHvUML6iIG0rs1g3EOc7159LKOYx4jfU18ZXMi4IO--eE-ZmqMMtRh)/dm/3/x8qckyq/d/live-240.m3u8#cell=lcf-eu-north-1b
+https://live.eu-north-1b.cf.dmcdn.net/sec2(M8_t_w5XALCZBuEqOz356ZkYsmSwgRAl4Ko4agIiN_5vMvbQkvznKpeDyePFzNFuO-XfAkTLwB1bAKjDer80MMSIRUxi4xCE8jWkeAHndTnuB1cnhYP-t5eZJLtiFDQP)/dm/3/x8qckyq/d/live-240.m3u8#cell=lcf-eu-north-1b
 
 # all-variants:
-#   240: https://live.eu-north-1b.cf.dmcdn.net/sec2(V01TP0OnAddDgtpihyMfbQKZ4_-7wswMI30ZXoJxL77g2snLwMVsKOYK90JxBSJV5Iw527mb4NTHvUML6iIG0rs1g3EOc7159LKOYx4jfU18ZXMi4IO--eE-ZmqMMtRh)/dm/3/x8qckyq/d/live-240.m3u8
+#   240: https://live.eu-north-1b.cf.dmcdn.net/sec2(M8_t_w5XALCZBuEqOz356ZkYsmSwgRAl4Ko4agIiN_5vMvbQkvznKpeDyePFzNFuO-XfAkTLwB1bAKjDer80MMSIRUxi4xCE8jWkeAHndTnuB1cnhYP-t5eZJLtiFDQP)/dm/3/x8qckyq/d/live-240.m3u8
