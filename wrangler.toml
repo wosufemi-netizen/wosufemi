@@ -1,3 +1,6 @@
 name = "wosufemi"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
+
+[triggers]
+crons = ["58 11,12,13 * * *"]

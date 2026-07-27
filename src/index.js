@@ -6,6 +6,29 @@
 const ALLOWED_USER_ID = 2027652715;
 
 export default {
+  async scheduled(event, env, ctx) {
+    // CF Cron Trigger — jalan tepat waktu (beda dg GHA cron yang sering delay)
+    // 58 11,12,13 * * * UTC = 18:58, 19:58, 20:58 WIB
+    const url = `https://api.github.com/repos/${env.GH_OWNER}/${env.GH_REPO}/actions/workflows/wosufemi.yml/dispatches`;
+    const payload = JSON.stringify({ ref: "master" });
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.GH_TOKEN}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "wosufemi-worker",
+          "Content-Type": "application/json",
+        },
+        body: payload,
+      });
+      console.log(`[cron] wosufemi dispatch → HTTP ${res.status}`);
+    } catch (e) {
+      console.error(`[cron] dispatch error: ${e.message}`);
+    }
+  },
+
   async fetch(request, env, ctx) {
     if (request.method === "GET") {
       return new Response("OK");

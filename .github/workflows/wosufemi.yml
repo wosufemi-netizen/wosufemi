@@ -1,8 +1,6 @@
 name: wosufemi
 
 on:
-  schedule:
-    - cron: '58 11-13 * * *'
   workflow_dispatch:
 
 permissions:
