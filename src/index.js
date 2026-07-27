@@ -129,6 +129,10 @@ export default {
         return new Response("OK");
       }
 
+      if (text.startsWith("/verify")) {
+        ctx.waitUntil(handleVerify(env, chatId, text));
+        return new Response("OK");
+      }
       if (text.startsWith("/record")) {
         ctx.waitUntil(handleRecord(env, chatId, text));
         return new Response("OK");
@@ -396,4 +400,113 @@ function escapeHtml(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+async function handleVerify(env, chatId, text) {
+  const parts = text.split(/s+/).filter(Boolean);
+  if (parts.length < 2) {
+    await tgSend(env, chatId, "Format: <code>/verify &lt;release_tag&gt;</code>
+Atau: <code>/verify list</code> untuk daftar rekaman + hash");
+    return;
+  }
+
+  const arg = parts[1].toLowerCase();
+
+  if (arg === "list") {
+    await handleVerifyList(env, chatId);
+    return;
+  }
+
+  // Fetch release .txt and show metadata + hashes
+  const tag = parts[1];
+  try {
+    const relRes = await fetch(
+      `https://api.github.com/repos/${env.GH_OWNER}/${env.GH_REPO}/releases/tags/${tag}`,
+      { headers: { Authorization: `Bearer ${env.GH_TOKEN}`, Accept: "application/vnd.github+json" } }
+    );
+    if (!relRes.ok) {
+      await tgSend(env, chatId, `❌ Release <code>${escapeHtml(tag)}</code> tidak ditemukan.`);
+      return;
+    }
+    const rel = await relRes.json();
+
+    // Find .txt asset
+    let txtContent = "";
+    for (const asset of rel.assets || []) {
+      if (asset.name.endsWith(".txt")) {
+        const txtRes = await fetch(asset.browser_download_url, {
+          headers: { Authorization: `Bearer ${env.GH_TOKEN}` }
+        });
+        txtContent = await txtRes.text();
+        break;
+      }
+    }
+
+    if (!txtContent) {
+      await tgSend(env, chatId, `❌ Tidak ada .txt di release <code>${escapeHtml(tag)}</code>`);
+      return;
+    }
+
+    // Parse metadata
+    const meta = {};
+    for (const line of txtContent.split("
+")) {
+      const trimmed = line.trim();
+      if (trimmed && !trimmed.startsWith("#") && trimmed.includes(":")) {
+        const [k, ...v] = trimmed.split(":");
+        meta[k.trim()] = v.join(":").trim();
+      }
+    }
+
+    const shaOrig = meta.sha256_orig || "N/A";
+    const shaHevc = meta.sha256_hevc || "N/A";
+
+    const msg = [
+      "🔒 <b>Verifikasi Integritas</b>",
+      "",
+      `📁 File: <code>${escapeHtml(meta.file || "?")}</code>`,
+      `📦 Size: ${meta.size || "?"}`,
+      `⏱ Durasi: ${meta.durasi || "?"}`,
+      `🖥 Resolusi: ${meta.resolusi || "?"}`,
+      `🎞 Codec: ${meta.codec || "?"}`,
+      `📶 Bitrate: ${meta.bitrate || "?"}`,
+      "",
+      `🔑 SHA256 (orig): <code>${shaOrig.substring(0, 32)}</code>`,
+      shaOrig.length > 32 ? `<code>${shaOrig.substring(32)}</code>` : "",
+      shaHevc !== "N/A" ? `🔑 SHA256 (HEVC): <code>${shaHevc.substring(0, 32)}</code>` : "",
+      shaHevc !== "N/A" && shaHevc.length > 32 ? `<code>${shaHevc.substring(32)}</code>` : "",
+      "",
+      "💡 Bandingkan hash di atas dengan file yang kamu download.",
+    ].filter(Boolean).join("
+");
+
+    await tgSend(env, chatId, msg);
+  } catch (e) {
+    await tgSend(env, chatId, `❌ Error: ${escapeHtml(String(e.message || e))}`);
+  }
+}
+
+async function handleVerifyList(env, chatId) {
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${env.GH_OWNER}/${env.GH_REPO}/releases?per_page=5`,
+      { headers: { Authorization: `Bearer ${env.GH_TOKEN}`, Accept: "application/vnd.github+json" } }
+    );
+    const releases = await res.json();
+    if (!releases.length) {
+      await tgSend(env, chatId, "📭 Belum ada release.");
+      return;
+    }
+
+    const lines = ["<b>📋 Rekaman terakhir</b>", ""];
+    for (const r of releases) {
+      lines.push(`• <code>${escapeHtml(r.tag_name)}</code>`);
+      lines.push(`  ${escapeHtml(r.title || r.tag_name)}`);
+      lines.push("");
+    }
+    lines.push("Gunakan: <code>/verify &lt;tag&gt;</code> untuk lihat hash");
+    await tgSend(env, chatId, lines.join("
+"));
+  } catch (e) {
+    await tgSend(env, chatId, `❌ Error: ${escapeHtml(String(e.message || e))}`);
+  }
+}
 }
