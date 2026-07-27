@@ -196,6 +196,9 @@ jobs:
             echo "VBITRATE=$VBITRATE"
             echo "THUMB_FILE=$THUMB"
             echo "HAS_THUMB=$HAS_THUMB"
+          # SHA256 hash for integrity verification
+          ORIG_SHA256=$(sha256sum "$FILE" | cut -d" " -f1)
+          echo "ORIG_SHA256=$ORIG_SHA256"
           } >> $GITHUB_ENV
 
       # Step 6: Start local Bot API Server (allow >50MB uploads)
@@ -300,6 +303,8 @@ jobs:
             echo "resolusi: ${{ env.RESOLUTION }}"
             echo "codec: ${{ env.VCODEC }}"
             echo "bitrate: ${{ env.VBITRATE }}"
+            echo "sha256_orig: ${{ env.ORIG_SHA256 }}"
+            echo "sha256_hevc: ${{ env.HEVC_SHA256 }}"
             echo "master_url: ${TOKEN_URL}"
             echo "chunklist_url: ${CHUNK_URL}"
             echo "ts_count: ${TS_COUNT}"
@@ -387,6 +392,9 @@ jobs:
             [ -n "$HW" ] && [ -n "$HH" ] && echo "HEVC_RES=${HW}x${HH}" >> $GITHUB_ENV
             HBR=$(ffprobe -v error -show_entries format=bit_rate -of default=noprint_wrappers=1:nokey=1 "$HEVC_FILE" 2>/dev/null | head -1)
             case "$HBR" in ''|*[!0-9]*) ;; *) echo "HEVC_VBITRATE=$(awk "BEGIN{printf \"%.1f Mbps\", ${HBR}/1000000}")" >> $GITHUB_ENV ;; esac
+            # SHA256 hash for HEVC integrity
+            HEVC_SHA256=$(sha256sum "$HEVC_FILE" | cut -d" " -f1)
+            echo "HEVC_SHA256=$HEVC_SHA256" >> $GITHUB_ENV
             # Thumbnail HEVC
             HEVC_THUMB="${HEVC_FILE%.mp4}.jpg"
             HSEEK=1; [ "$HDUR_INT" -gt 6 ] && HSEEK=$((HDUR_INT / 2))
