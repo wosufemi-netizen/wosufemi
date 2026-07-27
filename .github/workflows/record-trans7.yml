@@ -29,7 +29,7 @@ permissions:
 jobs:
   record:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 198
     env:
       TZ: Asia/Jakarta
 
