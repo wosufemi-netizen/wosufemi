@@ -23,6 +23,9 @@ env:
   DURATION: ${{ github.event.inputs.duration || github.event.client_payload.duration || '300' }}
   CHAT_ID: ${{ github.event.inputs.chat_id || github.event.client_payload.chat_id || '' }}
 
+permissions:
+  contents: write
+
 jobs:
   record:
     runs-on: ubuntu-latest
