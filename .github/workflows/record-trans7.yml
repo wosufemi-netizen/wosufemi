@@ -38,11 +38,13 @@ jobs:
         id: token
         run: |
           python scripts/gen_trans7_token.py
-          TOKEN_URL=$(grep '^TOKEN_URL=' trans7_url.txt | cut -d= -f2-)
+          TOKEN_URL=$(python -c "
+          from scripts.gen_trans7_token import generate_token_url
+          url, _, _ = generate_token_url()
+          print(url)
+          ")
           echo "url=$TOKEN_URL" >> "$GITHUB_OUTPUT"
-          EXPIRE=$(grep '^EXPIRE_AT=' trans7_url.txt | cut -d= -f2-)
-          echo "expire=$EXPIRE" >> "$GITHUB_OUTPUT"
-          echo "::notice::Token URL generated, expires at $EXPIRE"
+          echo "::notice::Token URL: ${TOKEN_URL:0:100}"
 
       # Step 2: Verify playlist is reachable
       - name: Verify playlist
