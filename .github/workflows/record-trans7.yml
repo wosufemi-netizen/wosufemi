@@ -323,7 +323,7 @@ jobs:
 
       # Step 10: Notify Telegram — HEVC
       - name: Notify Telegram — HEVC 10-bit
-        if: always() && steps.hevc.outputs.hevc_file != ''
+        if: always() && env.HEVC_FILE != ''
         continue-on-error: true
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
