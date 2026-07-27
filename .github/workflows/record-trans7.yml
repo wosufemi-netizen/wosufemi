@@ -11,17 +11,24 @@ on:
         description: "Stream type (trans7/transtv/cnn)"
         required: false
         default: "trans7"
+      chat_id:
+        description: "Telegram chat ID"
+        required: false
+        default: ""
   repository_dispatch:
     types: [record-trans7]
 
 env:
   STREAM_TYPE: ${{ github.event.inputs.type || github.event.client_payload.stream_type || 'trans7' }}
   DURATION: ${{ github.event.inputs.duration || github.event.client_payload.duration || '300' }}
+  CHAT_ID: ${{ github.event.inputs.chat_id || github.event.client_payload.chat_id || '' }}
 
 jobs:
   record:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    env:
+      TZ: Asia/Jakarta
 
     steps:
       - name: Checkout
@@ -92,7 +99,8 @@ jobs:
           set +e
           URL="${{ steps.token.outputs.url }}"
           DUR="${{ env.DURATION }}"
-          OUT="trans7_${{ env.STREAM_TYPE }}_$(date +%Y%m%d_%H%M%S).mp4"
+          NOW=$(date '+%Y-%m-%d_%H-%M-%S')
+          OUT="Trans7-${NOW}.mp4"
 
           echo "Recording ${DUR}s from Trans7..."
           ffmpeg -y \
@@ -125,12 +133,109 @@ jobs:
             ls -lh "$OUT"
             echo "recorded=true" >> "$GITHUB_OUTPUT"
             echo "output=$OUT" >> "$GITHUB_OUTPUT"
+            echo "ORIG_BYTES=$(stat -c%s "$OUT")" >> "$GITHUB_ENV"
+            echo "FILE_SIZE=$(ls -lh "$OUT" | awk '{print $5}')" >> "$GITHUB_ENV"
           else
             echo "recorded=false" >> "$GITHUB_OUTPUT"
             echo "::error::No output file"
           fi
 
-      # Step 5: Upload artifact
+      # Step 5: Extract metadata + thumbnail
+      - name: Extract metadata
+        id: meta
+        if: steps.record.outputs.recorded == 'true'
+        run: |
+          FILE="${{ steps.record.outputs.output }}"
+          THUMB="${FILE%.mp4}.jpg"
+
+          DUR_RAW=$(ffprobe -v error -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 "$FILE" 2>/dev/null | head -1)
+          DUR_INT=${DUR_RAW%.*}
+          [ -z "$DUR_INT" ] && DUR_INT=0
+          REAL_DURATION=$(printf '%02d:%02d:%02d' $((DUR_INT/3600)) $(((DUR_INT%3600)/60)) $((DUR_INT%60)))
+
+          WIDTH=$(ffprobe -v error -select_streams v:0 -show_entries stream=width \
+            -of default=noprint_wrappers=1:nokey=1 "$FILE" 2>/dev/null | head -1)
+          HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height \
+            -of default=noprint_wrappers=1:nokey=1 "$FILE" 2>/dev/null | head -1)
+          [ -n "$WIDTH" ] && [ -n "$HEIGHT" ] && RESOLUTION="${WIDTH}x${HEIGHT}" || RESOLUTION="?"
+
+          VCODEC=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+            -of default=noprint_wrappers=1:nokey=1 "$FILE" 2>/dev/null | head -1)
+          [ -z "$VCODEC" ] && VCODEC="?"
+
+          BR_RAW=$(ffprobe -v error -show_entries format=bit_rate \
+            -of default=noprint_wrappers=1:nokey=1 "$FILE" 2>/dev/null | head -1)
+          case "$BR_RAW" in ''|*[!0-9]*) VBITRATE="?" ;; *) VBITRATE="$(awk "BEGIN{printf \"%.1f Mbps\", ${BR_RAW}/1000000}")" ;; esac
+
+          echo "📊 Metadata: dur=$REAL_DURATION res=$RESOLUTION codec=$VCODEC br=$VBITRATE size=${{ env.FILE_SIZE }}"
+
+          # Thumbnail
+          SEEK=1; [ "$DUR_INT" -gt 6 ] && SEEK=$((DUR_INT / 2))
+          HAS_THUMB=0
+          ffmpeg -hide_banner -loglevel error -y -ss "$SEEK" -i "$FILE" \
+            -frames:v 1 -q:v 2 -vf "scale=640:-2" "$THUMB" 2>/dev/null || true
+          [ ! -s "$THUMB" ] && ffmpeg -hide_banner -loglevel error -y -ss 1 -i "$FILE" \
+            -frames:v 1 -q:v 2 -vf "scale=640:-2" "$THUMB" 2>/dev/null || true
+          [ -s "$THUMB" ] && HAS_THUMB=1 && echo "✅ Thumbnail: $THUMB" || rm -f "$THUMB"
+
+          {
+            echo "REAL_DURATION=$REAL_DURATION"
+            echo "RESOLUTION=$RESOLUTION"
+            echo "VCODEC=$VCODEC"
+            echo "VBITRATE=$VBITRATE"
+            echo "THUMB_FILE=$THUMB"
+            echo "HAS_THUMB=$HAS_THUMB"
+          } >> $GITHUB_ENV
+
+      # Step 6: Start local Bot API Server (allow >50MB uploads)
+      - name: Start local Bot API Server
+        if: success() && steps.record.outputs.recorded == 'true'
+        continue-on-error: true
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TG_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TG_API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          set +e
+          docker rm -f tg-bot-api >/dev/null 2>&1 || true
+          rm -rf /tmp/tg-bot-api && mkdir -p /tmp/tg-bot-api
+          docker run -d --name tg-bot-api -p 8081:8081 \
+            -e TELEGRAM_API_ID="$TELEGRAM_API_ID" \
+            -e TELEGRAM_API_HASH="$TELEGRAM_API_HASH" \
+            -e TELEGRAM_LOCAL=1 \
+            -v /tmp/tg-bot-api:/var/lib/telegram-bot-api \
+            aiogram/telegram-bot-api:latest \
+            --local -m 2097152000 --dir /var/lib/telegram-bot-api --http-port 8081 --verbosity=2
+          echo "⏳ Menunggu Bot API Server siap..."
+          for i in $(seq 1 45); do
+            CODE=$(curl -s -o /tmp/getme.json -w "%{http_code}" "http://localhost:8081/bot${BOT_TOKEN}/getMe" 2>/dev/null)
+            if [ "$CODE" = "200" ]; then echo "✅ Bot API Server ready"; break; fi
+            sleep 2
+          done
+
+      # Step 7: Send video to Telegram
+      - name: Notify Telegram — send video
+        if: always() && steps.record.outputs.recorded == 'true'
+        continue-on-error: true
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ env.CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
+          FILENAME: ${{ steps.record.outputs.output }}
+          JOB_STATUS: success
+          REAL_DURATION: ${{ env.REAL_DURATION }}
+          RESOLUTION: ${{ env.RESOLUTION }}
+          VCODEC: ${{ env.VCODEC }}
+          VBITRATE: ${{ env.VBITRATE }}
+          FILE_SIZE: ${{ env.FILE_SIZE }}
+          ORIG_BYTES: ${{ env.ORIG_BYTES }}
+          THUMB_FILE: ${{ env.THUMB_FILE }}
+          HAS_THUMB: ${{ env.HAS_THUMB }}
+          TG_API_URL: "http://localhost:8081"
+          PHASE: original
+        run: python3 scripts/notify.py
+
+      # Step 8: Upload artifact (backup)
       - name: Upload recording
         if: steps.record.outputs.recorded == 'true'
         uses: actions/upload-artifact@v4
@@ -139,21 +244,20 @@ jobs:
           path: trans7_*.mp4
           retention-days: 3
 
-      # Step 6: Notify Telegram
-      - name: Notify Telegram
+      # Step 9: Notify fallback (kalau Bot API Server gagal)
+      - name: Notify Telegram — fallback text
         if: always()
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ env.CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
           RECORDED: ${{ steps.record.outputs.recorded }}
           HTTP: ${{ steps.verify.outputs.http_code }}
           OUTFILE: ${{ steps.record.outputs.output }}
         run: |
           [ -z "$TELEGRAM_BOT_TOKEN" ] && exit 0
-          if [ "$HTTP" = "200" ] && [ "$RECORDED" = "true" ]; then
-            MSG="✅ Trans7 recorded: ${OUTFILE} (${{ env.DURATION }}s)"
-          elif [ "$HTTP" = "200" ]; then
-            MSG="⚠️ Trans7 token OK (200) but ffmpeg failed"
+          [ "$RECORDED" = "true" ] && exit 0  # sudah dikirim via notify.py
+          if [ "$HTTP" = "200" ]; then
+            MSG="⚠️ Trans7 token OK tapi rekaman gagal"
           else
             MSG="❌ Trans7 failed — HTTP ${HTTP}"
           fi
