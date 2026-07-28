@@ -2,8 +2,8 @@
   "ok": true,
   "fresh": true,
   "reason": "capture_ok",
-  "captured_at": "2026-07-28T18:59:47+07:00",
-  "checked_at": "2026-07-28T18:59:47+07:00",
+  "captured_at": "2026-07-28T19:59:31+07:00",
+  "checked_at": "2026-07-28T19:59:31+07:00",
   "url": "https://live.eu-north-1b.cf.dmcdn.net/sec2(wz5OgylJRkJ5Z2s08znoq4Nj4Bh97VAHQlkksVasdKuBhS21lEArYO-ikVjsZvhl4meRgKMYGw7YfY-XK3E9_LGnm8g9rA4pm5iG9KR1tfq-0Xm14kSlS21BD0pXLp2r)/dm/3/x8qckyq/d/live-720.m3u8",
   "resolution": "720p",
   "source": "m3u8_capture.py"
