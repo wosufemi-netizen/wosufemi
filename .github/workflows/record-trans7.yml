@@ -50,57 +50,82 @@ jobs:
         id: token
         run: |
           TOKEN_URL=$(python scripts/gen_trans7_token.py 2>&1 | grep '^TOKEN_URL=' | cut -d= -f2-)
+          if [ -z "$TOKEN_URL" ]; then
+            echo "::error::Token generator returned empty URL"
+            exit 1
+          fi
           echo "url=$TOKEN_URL" >> "$GITHUB_OUTPUT"
           echo "::notice::Token URL: ${TOKEN_URL:0:100}"
 
-      # Step 2: Verify playlist reachable
-      - name: Verify playlist
-        id: verify
+      # Step 2+3: ONE fetch only — verify + parse chunklist (token single-use / race-prone)
+      - name: Resolve playlist + chunklist
+        id: playlist
         run: |
+          set -e
           URL="${{ steps.token.outputs.url }}"
-          echo "Testing: ${URL:0:80}..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+          echo "Fetching master once: ${URL:0:80}..."
+          BODY_FILE=$(mktemp)
+          HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
             -H "Referer: https://20.detik.com/" \
             -H "Origin: https://20.detik.com" \
-            "$URL")
+            "$URL" || true)
           echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
           echo "::notice::Playlist HTTP status: $HTTP_CODE"
           if [ "$HTTP_CODE" != "200" ]; then
             echo "::error::Playlist returned $HTTP_CODE"
+            head -c 400 "$BODY_FILE" || true
+            rm -f "$BODY_FILE"
             exit 1
           fi
-
-      # Step 3: Parse chunklist
-      - name: Get chunklist URL
-        id: chunklist
-        if: steps.verify.outputs.http_code == '200'
-        run: |
-          URL="${{ steps.token.outputs.url }}"
-          PLAYLIST=$(curl -s \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            -H "Referer: https://20.detik.com/" \
-            "$URL")
-          echo "$PLAYLIST"
-          CHUNK=$(echo "$PLAYLIST" | grep -v '^#' | grep -v '^$' | head -1)
+          # Must be real HLS, not nginx/HTML 403 body with fake 200
+          if ! grep -q '#EXTM3U' "$BODY_FILE"; then
+            echo "::error::Body is not HLS playlist (#EXTM3U missing)"
+            head -c 400 "$BODY_FILE" || true
+            rm -f "$BODY_FILE"
+            exit 1
+          fi
+          cat "$BODY_FILE"
+          # Prefer 720p (b744100 / 1280x720), else first media URI
+          CHUNK=$(awk '
+            /RESOLUTION=1280x720/ { want=1; next }
+            want && $0 !~ /^#/ && NF { print; exit }
+          ' "$BODY_FILE")
           if [ -z "$CHUNK" ]; then
-            echo "::error::No chunklist found"
+            CHUNK=$(grep -v '^#' "$BODY_FILE" | grep -v '^$' | head -1)
+          fi
+          rm -f "$BODY_FILE"
+          if [ -z "$CHUNK" ]; then
+            echo "::error::No chunklist found in playlist"
             exit 1
           fi
-          if [[ "$CHUNK" != http* ]]; then
-            BASE=$(echo "$URL" | sed 's|/[^/]*$||')
-            CHUNK="${BASE}/${CHUNK}"
-          fi
+          case "$CHUNK" in
+            http*) ;;
+            *)
+              BASE=$(echo "$URL" | sed 's|/[^/]*$||')
+              CHUNK="${BASE}/${CHUNK}"
+              ;;
+          esac
+          # Reject HTML-as-chunklist (old bug: .../smil:trans7.smil/<html>)
+          case "$CHUNK" in
+            *'<html'*|*'<HTML'*|*Forbidden*)
+              echo "::error::Parsed chunklist looks like HTML error page: ${CHUNK:0:120}"
+              exit 1
+              ;;
+          esac
           echo "chunk_url=$CHUNK" >> "$GITHUB_OUTPUT"
-          echo "::notice::Chunklist: ${CHUNK:0:100}"
+          # Keep old id aliases for downstream steps that still reference them
+          echo "chunk_url=$CHUNK" >> "$GITHUB_ENV"
+          echo "::notice::Chunklist: ${CHUNK:0:120}"
 
-      # Step 4: Record with ffmpeg
+      # Step 4: Record with ffmpeg — chunklist FIRST (master already consumed by resolve step)
       - name: Record stream
         id: record
-        if: steps.chunklist.outputs.chunk_url != ''
+        if: steps.playlist.outputs.chunk_url != ''
         run: |
           set +e
-          URL="${{ steps.token.outputs.url }}"
+          MASTER="${{ steps.token.outputs.url }}"
+          CHUNK="${{ steps.playlist.outputs.chunk_url }}"
           DUR="${{ env.DURATION }}"
           NOW=$(date '+%Y-%m-%d_%H-%M-%S')
           # Duration label: 300→5m, 3600→1h, 3900→1h5m
@@ -111,35 +136,41 @@ jobs:
           DL="${DH}${DM}"
           [ -z "$DL" ] && DL="${DUR}s"
           OUT="Wosufemi-Asset-${NOW}-${DL}.mp4"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+          # CRLF headers required by ffmpeg HTTP
+          HDR=$(printf 'Referer: https://20.detik.com/\r\nOrigin: https://20.detik.com\r\n')
 
-          echo "Recording ${DUR}s from Trans7..."
+          echo "Recording ${DUR}s from Trans7 chunklist (avoid reusing spent master token)..."
           ffmpeg -y \
-            -user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
-            -headers "Referer: https://20.detik.com/
-          Origin: https://20.detik.com
-          " \
-            -i "$URL" \
+            -user_agent "$UA" \
+            -headers "$HDR" \
+            -i "$CHUNK" \
             -t "$DUR" \
             -c copy \
             -movflags +faststart \
             "$OUT" 2>&1
           RC=$?
 
-          if [ $RC -ne 0 ] || [ ! -f "$OUT" ]; then
-            echo "::warn::Retrying with chunklist URL..."
-            CHUNK="${{ steps.chunklist.outputs.chunk_url }}"
+          # Fallback: fresh master token if chunklist path failed
+          if [ $RC -ne 0 ] || [ ! -s "$OUT" ]; then
+            echo "::warn::Chunklist record failed — regenerating token + master fallback..."
+            rm -f "$OUT"
+            NEW_URL=$(python scripts/gen_trans7_token.py 2>&1 | grep '^TOKEN_URL=' | cut -d= -f2-)
+            if [ -n "$NEW_URL" ]; then
+              MASTER="$NEW_URL"
+              echo "::notice::Fresh master token for fallback"
+            fi
             ffmpeg -y \
-              -user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              -headers "Referer: https://20.detik.com/
-          " \
-              -i "$CHUNK" \
+              -user_agent "$UA" \
+              -headers "$HDR" \
+              -i "$MASTER" \
               -t "$DUR" \
               -c copy \
               -movflags +faststart \
               "$OUT" 2>&1
           fi
 
-          if [ -f "$OUT" ]; then
+          if [ -s "$OUT" ]; then
             ls -lh "$OUT"
             echo "recorded=true" >> "$GITHUB_OUTPUT"
             echo "output=$OUT" >> "$GITHUB_OUTPUT"
@@ -272,7 +303,7 @@ jobs:
           DL="${DH}${DM}"; [ -z "$DL" ] && DL="${DUR}s"
           TITLE="Trans7 — $(date '+%Y-%m-%d %H:%M:%S') WIB (${DL})"
           TOKEN_URL="${{ steps.token.outputs.url }}"
-          CHUNK_URL="${{ steps.chunklist.outputs.chunk_url }}"
+          CHUNK_URL="${{ steps.playlist.outputs.chunk_url }}"
 
           # Fetch chunklist → ambil semua .ts URLs
           TS_LIST_FILE=$(mktemp)
@@ -440,7 +471,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ env.CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
           RECORDED: ${{ steps.record.outputs.recorded }}
-          HTTP: ${{ steps.verify.outputs.http_code }}
+          HTTP: ${{ steps.playlist.outputs.http_code }}
           OUTFILE: ${{ steps.record.outputs.output }}
         run: |
           [ -z "$TELEGRAM_BOT_TOKEN" ] && exit 0
