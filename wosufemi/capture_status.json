@@ -2,9 +2,9 @@
   "ok": true,
   "fresh": true,
   "reason": "capture_ok",
-  "captured_at": "2026-08-01T20:59:46+07:00",
-  "checked_at": "2026-08-01T20:59:46+07:00",
-  "url": "https://live.eu-north-1b.cf.dmcdn.net/sec2(WHlnS_SjchNg70qPxLwLg0Dc10k8tGqImNTkfdOju-vHaQnCt6KF9kfoKwqZ22FaBjLoaiwNSBlFBtTsdkAgVbbH-TB5YLStM3n-W6iyUHHRpNenI3suPoBTEizLxYsW)/dm/3/x8qckyq/d/live-720.m3u8",
+  "captured_at": "2026-08-02T18:59:14+07:00",
+  "checked_at": "2026-08-02T18:59:14+07:00",
+  "url": "https://live.eu-north-1b.cf.dmcdn.net/sec2(nBjJS7rzE0WYkGn_dUyRATt1LY5Zq95V0LS9_6Nda4eEQlYnoAUlP-lBoF9cDoRlB-GyOoK227eZwtV7eGPsBCxTLmb5DPeWtnqzs7II--GSUoFdefSMnKRIDDhiHfzt)/dm/3/x8qckyq/d/live-720.m3u8",
   "resolution": "720p",
   "source": "m3u8_capture.py"
 }
