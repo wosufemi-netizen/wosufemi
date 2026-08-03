@@ -124,68 +124,17 @@ jobs:
           echo "chunk_url=$CHUNK" >> "$GITHUB_OUTPUT"
           echo "::notice::Chunklist: ${CHUNK:0:120}"
 
-      # Step 4: Record with ffmpeg
+      # Step 4: Record with ffmpeg + live Telegram progress
       - name: Record stream
         id: record
         if: steps.chunklist.outputs.chunk_url != ''
-        run: |
-          set +e
-          MASTER="${{ steps.token.outputs.url }}"
-          CHUNK="${{ steps.chunklist.outputs.chunk_url }}"
-          DUR="${{ env.DURATION }}"
-          NOW=$(date '+%Y-%m-%d_%H-%M-%S')
-          # Duration label: 300→5m, 3600→1h, 3900→1h5m
-          DLABEL="$(printf '%02d:%02d:%02d' $((DUR/3600)) $(((DUR%3600)/60)) $((DUR%60)))"
-          DH=""; DM=""
-          [ $((DUR/3600)) -gt 0 ] && DH="$((DUR/3600))h"
-          [ $(((DUR%3600)/60)) -gt 0 ] && DM="$(((DUR%3600)/60))m"
-          DL="${DH}${DM}"
-          [ -z "$DL" ] && DL="${DUR}s"
-          OUT="Wosufemi-Asset-${NOW}-${DL}.mp4"
-          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-          # CRLF headers required by ffmpeg HTTP
-          HDR=$(printf 'Referer: https://20.detik.com/\r\nOrigin: https://20.detik.com\r\n')
-
-          echo "Recording ${DUR}s from Trans7 chunklist (avoid reusing spent master token)..."
-          ffmpeg -y \
-            -user_agent "$UA" \
-            -headers "$HDR" \
-            -i "$CHUNK" \
-            -t "$DUR" \
-            -c copy \
-            -movflags +faststart \
-            "$OUT" 2>&1
-          RC=$?
-
-          # Fallback: fresh master token if chunklist path failed
-          if [ $RC -ne 0 ] || [ ! -s "$OUT" ]; then
-            echo "::warn::Chunklist record failed — regenerating token + master fallback..."
-            rm -f "$OUT"
-            NEW_URL=$(python scripts/gen_trans7_token.py 2>&1 | grep '^TOKEN_URL=' | cut -d= -f2-)
-            if [ -n "$NEW_URL" ]; then
-              MASTER="$NEW_URL"
-              echo "::notice::Fresh master token for fallback"
-            fi
-            ffmpeg -y \
-              -user_agent "$UA" \
-              -headers "$HDR" \
-              -i "$MASTER" \
-              -t "$DUR" \
-              -c copy \
-              -movflags +faststart \
-              "$OUT" 2>&1
-          fi
-
-          if [ -s "$OUT" ]; then
-            ls -lh "$OUT"
-            echo "recorded=true" >> "$GITHUB_OUTPUT"
-            echo "output=$OUT" >> "$GITHUB_OUTPUT"
-            echo "ORIG_BYTES=$(stat -c%s "$OUT")" >> "$GITHUB_ENV"
-            echo "FILE_SIZE=$(ls -lh "$OUT" | awk '{print $5}')" >> "$GITHUB_ENV"
-          else
-            echo "recorded=false" >> "$GITHUB_OUTPUT"
-            echo "::error::No output file"
-          fi
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ env.CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
+          DURATION: ${{ env.DURATION }}
+          M3U8_URL: ${{ steps.chunklist.outputs.chunk_url }}
+          CHUNK_URL: ${{ steps.token.outputs.url }}
+        run: python3 scripts/rec_progress.py
 
       # Step 5: Extract metadata + thumbnail
       - name: Extract metadata
