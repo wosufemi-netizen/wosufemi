@@ -57,35 +57,44 @@ jobs:
           echo "url=$TOKEN_URL" >> "$GITHUB_OUTPUT"
           echo "::notice::Token URL: ${TOKEN_URL:0:100}"
 
-      # Step 2+3: ONE fetch only — verify + parse chunklist (token single-use / race-prone)
-      - name: Resolve playlist + chunklist
-        id: playlist
+      # Step 2: Verify playlist reachable
+      - name: Verify playlist
+        id: verify
         run: |
-          set -e
           URL="${{ steps.token.outputs.url }}"
-          echo "Fetching master once: ${URL:0:80}..."
-          BODY_FILE=$(mktemp)
-          HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" \
+          echo "Testing: ${URL:0:80}..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
             -H "Referer: https://20.detik.com/" \
             -H "Origin: https://20.detik.com" \
-            "$URL" || true)
+            "$URL")
           echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
           echo "::notice::Playlist HTTP status: $HTTP_CODE"
           if [ "$HTTP_CODE" != "200" ]; then
             echo "::error::Playlist returned $HTTP_CODE"
-            head -c 400 "$BODY_FILE" || true
-            rm -f "$BODY_FILE"
             exit 1
           fi
-          # Must be real HLS, not nginx/HTML 403 body with fake 200
+
+      # Step 3: Parse chunklist
+      - name: Get chunklist URL
+        id: chunklist
+        if: steps.verify.outputs.http_code == '200'
+        run: |
+          URL="${{ steps.token.outputs.url }}"
+          BODY_FILE=$(mktemp)
+          curl -s -o "$BODY_FILE" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
+            -H "Referer: https://20.detik.com/" \
+            -H "Origin: https://20.detik.com" \
+            "$URL"
+          cat "$BODY_FILE"
+          # Must be real HLS, not nginx/HTML body
           if ! grep -q '#EXTM3U' "$BODY_FILE"; then
             echo "::error::Body is not HLS playlist (#EXTM3U missing)"
             head -c 400 "$BODY_FILE" || true
             rm -f "$BODY_FILE"
             exit 1
           fi
-          cat "$BODY_FILE"
           # Prefer 720p (b744100 / 1280x720), else first media URI
           CHUNK=$(awk '
             /RESOLUTION=1280x720/ { want=1; next }
@@ -106,7 +115,6 @@ jobs:
               CHUNK="${BASE}/${CHUNK}"
               ;;
           esac
-          # Reject HTML-as-chunklist (old bug: .../smil:trans7.smil/<html>)
           case "$CHUNK" in
             *'<html'*|*'<HTML'*|*Forbidden*)
               echo "::error::Parsed chunklist looks like HTML error page: ${CHUNK:0:120}"
@@ -114,18 +122,16 @@ jobs:
               ;;
           esac
           echo "chunk_url=$CHUNK" >> "$GITHUB_OUTPUT"
-          # Keep old id aliases for downstream steps that still reference them
-          echo "chunk_url=$CHUNK" >> "$GITHUB_ENV"
           echo "::notice::Chunklist: ${CHUNK:0:120}"
 
-      # Step 4: Record with ffmpeg — chunklist FIRST (master already consumed by resolve step)
+      # Step 4: Record with ffmpeg
       - name: Record stream
         id: record
-        if: steps.playlist.outputs.chunk_url != ''
+        if: steps.chunklist.outputs.chunk_url != ''
         run: |
           set +e
           MASTER="${{ steps.token.outputs.url }}"
-          CHUNK="${{ steps.playlist.outputs.chunk_url }}"
+          CHUNK="${{ steps.chunklist.outputs.chunk_url }}"
           DUR="${{ env.DURATION }}"
           NOW=$(date '+%Y-%m-%d_%H-%M-%S')
           # Duration label: 300→5m, 3600→1h, 3900→1h5m
@@ -303,7 +309,7 @@ jobs:
           DL="${DH}${DM}"; [ -z "$DL" ] && DL="${DUR}s"
           TITLE="Trans7 — $(date '+%Y-%m-%d %H:%M:%S') WIB (${DL})"
           TOKEN_URL="${{ steps.token.outputs.url }}"
-          CHUNK_URL="${{ steps.playlist.outputs.chunk_url }}"
+          CHUNK_URL="${{ steps.chunklist.outputs.chunk_url }}"
 
           # Fetch chunklist → ambil semua .ts URLs
           TS_LIST_FILE=$(mktemp)
@@ -471,7 +477,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ env.CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
           RECORDED: ${{ steps.record.outputs.recorded }}
-          HTTP: ${{ steps.playlist.outputs.http_code }}
+          HTTP: ${{ steps.verify.outputs.http_code }}
           OUTFILE: ${{ steps.record.outputs.output }}
         run: |
           [ -z "$TELEGRAM_BOT_TOKEN" ] && exit 0
