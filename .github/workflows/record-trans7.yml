@@ -356,12 +356,32 @@ jobs:
           fi
           echo "   Mode: ${TGT_MODE} (target LRA ${TGT_LRA} LU)"
 
+          # ── #6 Loudness-weighted compression ──
+          # Compressor threshold adapts to source loudness:
+          #   Source already at target (-14 LUFS) → less compress (preserve dynamics)
+          #   Source quiet (-20 LUFS) → more compress (bring up to target)
+          IN_I_INT=${IN_I%.*}
+          [ -z "$IN_I_INT" ] && IN_I_INT=-20
+          # Threshold = -18dB base, adjust ±6dB based on distance from target
+          # Delta = |IN_I - (-14)|, threshold = -18 + (delta * 0.6), clamped -24 to -12
+          DELTA=$(( IN_I_INT + 14 ))
+          [ "$DELTA" -lt 0 ] && DELTA=$(( -DELTA ))
+          THRESH=$(( -18 + (DELTA * 60) / 100 ))
+          [ "$THRESH" -gt -12 ] && THRESH=-12
+          [ "$THRESH" -lt -24 ] && THRESH=-24
+          # Ratio: more delta → higher ratio (2.0 to 3.5)
+          RATIO_NUM=$(( 20 + DELTA * 15 / 10 ))
+          [ "$RATIO_NUM" -gt 35 ] && RATIO_NUM=35
+          [ "$RATIO_NUM" -lt 20 ] && RATIO_NUM=20
+          RATIO=$(awk "BEGIN{printf \"%.1f\", ${RATIO_NUM}/10}")
+          echo "   Loudness-weighted: delta=${DELTA} LU → threshold=${THRESH}dB ratio=${RATIO}:1"
+
           # Fallback if analysis fails
           if [ -z "$IN_I" ] || [ "$IN_I" = "-inf" ]; then
             echo "   ⚠️ Loudness analysis failed, using single-pass preset"
             AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA},speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,alimiter=limit=-1.0dB:level=false"
           else
-            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true,speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,alimiter=limit=-1.0dB:level=false"
+            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true,speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=${THRESH}dB:ratio=${RATIO}:attack=20:release=250:makeup=2,alimiter=limit=-1.0dB:level=false"
           fi
           echo "   Target: -14 LUFS / -1.0 dBTP / LRA ${TGT_LRA} LU (${TGT_MODE})"
 
