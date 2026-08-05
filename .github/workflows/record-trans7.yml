@@ -453,15 +453,17 @@ jobs:
           echo "   Harmonic: disabled (ffmpeg 6.1.1 missing filters)"
 
           # ── Build AF_MASTER chain (core filters, no resampling) ──
+          # Order: speechnorm → compand → acompressor → loudnorm → limiter
+          # loudnorm LAST so it normalizes whatever other filters did
           if [ -z "$IN_I" ] || [ "$IN_I" = "-inf" ]; then
             echo "   ⚠️ Loudness analysis failed, using single-pass preset"
-            AF_MASTER_CHAIN="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:dual_mono=${DUAL_MONO},speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=1,${LIMITER}"
+            AF_MASTER_CHAIN="speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=1,loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:dual_mono=${DUAL_MONO},${LIMITER}"
           else
-            AF_MASTER_CHAIN="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true:dual_mono=${DUAL_MONO},speechnorm=e=50:r=0.0005:l=1"
+            AF_MASTER_CHAIN="speechnorm=e=50:r=0.0005:l=1"
             [ -n "$EXPAND" ] && AF_MASTER_CHAIN="${AF_MASTER_CHAIN},${EXPAND}"
             AF_MASTER_CHAIN="${AF_MASTER_CHAIN},acompressor=threshold=${THRESH}dB:ratio=${RATIO}:attack=20:release=250:makeup=1"
             [ -n "$HARMONIC" ] && AF_MASTER_CHAIN="${AF_MASTER_CHAIN},${HARMONIC}"
-            AF_MASTER_CHAIN="${AF_MASTER_CHAIN},${LIMITER}"
+            AF_MASTER_CHAIN="${AF_MASTER_CHAIN},loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true:dual_mono=${DUAL_MONO},${LIMITER}"
           fi
 
           # ── #5 Loudness-weighted resampling (96k analysis → 48k output) ──
