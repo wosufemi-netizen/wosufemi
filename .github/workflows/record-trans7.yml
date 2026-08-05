@@ -455,11 +455,11 @@ jobs:
           # ── Build AF_MASTER chain (core filters, no resampling) ──
           if [ -z "$IN_I" ] || [ "$IN_I" = "-inf" ]; then
             echo "   ⚠️ Loudness analysis failed, using single-pass preset"
-            AF_MASTER_CHAIN="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:dual_mono=${DUAL_MONO},speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,${LIMITER}"
+            AF_MASTER_CHAIN="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:dual_mono=${DUAL_MONO},speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=1,${LIMITER}"
           else
             AF_MASTER_CHAIN="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true:dual_mono=${DUAL_MONO},speechnorm=e=50:r=0.0005:l=1"
             [ -n "$EXPAND" ] && AF_MASTER_CHAIN="${AF_MASTER_CHAIN},${EXPAND}"
-            AF_MASTER_CHAIN="${AF_MASTER_CHAIN},acompressor=threshold=${THRESH}dB:ratio=${RATIO}:attack=20:release=250:makeup=2"
+            AF_MASTER_CHAIN="${AF_MASTER_CHAIN},acompressor=threshold=${THRESH}dB:ratio=${RATIO}:attack=20:release=250:makeup=1"
             [ -n "$HARMONIC" ] && AF_MASTER_CHAIN="${AF_MASTER_CHAIN},${HARMONIC}"
             AF_MASTER_CHAIN="${AF_MASTER_CHAIN},${LIMITER}"
           fi
@@ -602,7 +602,7 @@ jobs:
             # Post-encode loudness verification
             POST_LOUD=$(ffmpeg -hide_banner -i "$HEVC_FILE" \
               -af "loudnorm=I=-14:TP=-1.0:LRA=9:print_format=summary" \
-              -f null - 2>&1 | grep -E 'Input Integrated|Input True Peak|Input LRA' | awk '{print $3}')
+              -f null - 2>&1 | grep -E 'Input Integrated|Input True Peak|Input LRA' | awk '{print $(NF-1)}')
             POST_I=$(echo "$POST_LOUD" | sed -n '1p')
             POST_TP=$(echo "$POST_LOUD" | sed -n '2p')
             POST_LRA=$(echo "$POST_LOUD" | sed -n '3p')

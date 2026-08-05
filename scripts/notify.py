@@ -255,7 +255,7 @@ if job_status == "success":
                 f"🎞 Video: {hevc_codec} @ {hevc_br} | 🗜 Ratio: {hevc_comp}:1\n\n"
                 f"🔊 <b>Loudness:</b>\n"
                 f"  {loud_emoji} {hevc_loud_i} LUFS (target -14)\n"
-                f"  📊 TP {hevc_loud_tp} dB | LRA {hevc_loud_lra} LU\n\n"
+                f"  📊 TP: {hevc_loud_tp} dB | LRA: {hevc_loud_lra} LU\n\n"
                 f"🎵 <b>Audio:</b>\n"
                 f"  {hevc_acodec} | {hevc_abr_kbps} | {hevc_asr}Hz | {hevc_ach}ch\n"
                 f"  Grade: {audio_grade}\n"
