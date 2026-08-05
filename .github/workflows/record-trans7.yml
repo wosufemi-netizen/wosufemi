@@ -342,14 +342,28 @@ jobs:
           IN_THRESH=$(echo "$LOUD_JSON" | grep 'input_thresh' | sed 's/.*: *"//' | sed 's/".*//')
           echo "   Input: ${IN_I} LUFS, TP ${IN_TP} dB, LRA ${IN_LRA} LU"
 
+          # ── LRA targeting: auto-pick target LRA from source ──
+          # Low LRA (speech/news) → cinematic tight control (LRA 5)
+          # High LRA (music/ads) → documentary natural (LRA 11)
+          LRA_INT=${IN_LRA%.*}
+          [ -z "$LRA_INT" ] && LRA_INT=8
+          if [ "$LRA_INT" -le 8 ]; then
+            TGT_LRA=5
+            TGT_MODE="cinematic"
+          else
+            TGT_LRA=11
+            TGT_MODE="documentary"
+          fi
+          echo "   Mode: ${TGT_MODE} (target LRA ${TGT_LRA} LU)"
+
           # Fallback if analysis fails
           if [ -z "$IN_I" ] || [ "$IN_I" = "-inf" ]; then
             echo "   ⚠️ Loudness analysis failed, using single-pass preset"
-            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=9,speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,alimiter=limit=-1.0dB:level=false"
+            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA},speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,alimiter=limit=-1.0dB:level=false"
           else
-            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=9:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true,speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,alimiter=limit=-1.0dB:level=false"
+            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true,speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,alimiter=limit=-1.0dB:level=false"
           fi
-          echo "   Target: -14 LUFS / -1.0 dBTP / LRA 9 LU"
+          echo "   Target: -14 LUFS / -1.0 dBTP / LRA ${TGT_LRA} LU (${TGT_MODE})"
 
           # Progress bar
           CHAT_ID="$CHAT_ID" FILENAME="$FILE" TG_API_URL="$TG_API_URL" \
