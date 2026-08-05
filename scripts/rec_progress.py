@@ -131,6 +131,7 @@ def build_status_msg(pct, elapsed=0):
 
 
 ffmpeg_done = threading.Event()
+rec_start = 0.0  # Set by run_ffmpeg; wall-clock start for progress (out_time_us is absolute PTS)
 
 
 def monitor_progress():
@@ -155,21 +156,11 @@ def monitor_progress():
         if not data:
             continue
 
-        current_us = 0
-        for line in data.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("out_time_us="):
-                try:
-                    current_us = int(line.split("=", 1)[1])
-                except Exception:
-                    pass
-            elif line.startswith("out_time_ms="):
-                try:
-                    current_us = int(line.split("=", 1)[1]) * 1000
-                except Exception:
-                    pass
-
-        current_sec = current_us / 1_000_000
+        # Use wall-clock elapsed time — out_time_us from ffmpeg -progress is
+        # absolute PTS for live HLS (stream may run hours), not recording duration.
+        if rec_start <= 0:
+            continue
+        current_sec = time.time() - rec_start
         pct = min(int((current_sec / DURATION) * 100), 100) if DURATION > 0 else 0
         now_t = time.time()
 
@@ -182,6 +173,7 @@ def monitor_progress():
 
 
 def run_ffmpeg(url, label):
+    global rec_start
     cmd = build_ffmpeg_cmd(url, OUT)
     print("[ffmpeg] {} - {}".format(label, " ".join(cmd[:8])), flush=True)
     try:
@@ -189,6 +181,7 @@ def run_ffmpeg(url, label):
             os.remove(PROGRESS_FILE)
     except Exception:
         pass
+    rec_start = time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
     def drain():
