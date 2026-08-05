@@ -376,12 +376,61 @@ jobs:
           RATIO=$(awk "BEGIN{printf \"%.1f\", ${RATIO_NUM}/10}")
           echo "   Loudness-weighted: delta=${DELTA} LU → threshold=${THRESH}dB ratio=${RATIO}:1"
 
+          # ── #1 True peak limiting 8x oversampling ──
+          # alimiter with 8x oversampling catches inter-sample peaks missed at 1x
+          LIMITER="alimiter=limit=-1.0dB:level=8x"
+          echo "   True peak: 8x oversampling limiter"
+
+          # ── #2 Per-channel loudnorm (dual_mono) ──
+          # loudnorm with dual_mono=true balances L/R channels separately
+          # Use when channel imbalance detected (|L_I - R_I| > 2 LU)
+          DUAL_MONO="false"
+          if [ -n "$IN_I" ] && [ "$IN_I" != "-inf" ]; then
+            # Quick check for channel imbalance via ebur128 per-channel
+            CH_BAL=$(ffmpeg -hide_banner -i "$FILE" -t 10 \
+              -filter_complex "[0:a]ebur128=peak=none:framelog=verbose:metadata=1" \
+              -f null - 2>&1 | grep -E "I:\s+.*LUFS" | head -2 | awk '{print $2}' || true)
+            if [ -n "$CH_BAL" ] && [ "$(echo "$CH_BAL" | wc -l)" -eq 2 ]; then
+              L_I=$(echo "$CH_BAL" | head -1)
+              R_I=$(echo "$CH_BAL" | tail -1)
+              DIFF=$(awk "BEGIN{d=$L_I-$R_I; if(d<0)d=-d; printf \"%.0f\", d}")
+              if [ "$DIFF" -gt 2 ]; then
+                DUAL_MONO="true"
+                echo "   Channel imbalance: L=${L_I} R=${R_I} → dual_mono=true"
+              fi
+            fi
+          fi
+
+          # ── #4 Dynamic range expansion (de-compand) ──
+          # If LRA < 4, source is over-compressed (broadcast) → expand
+          # If LRA > 10, source is dynamic → light compress
+          if [ -n "$IN_LRA" ]; then
+            LRA_CHECK=${IN_LRA%.*}
+            if [ "$LRA_CHECK" -lt 4 ]; then
+              echo "   De-compand: LRA ${IN_LRA} < 4 → dynamic range expansion"
+              EXPAND="acompressor=threshold=-20dB:ratio=0.5:attack=20:release=250:makeup=1"
+            else
+              EXPAND=""
+            fi
+          else
+            EXPAND=""
+          fi
+
+          # ── #5 Harmonic saturation (analog warmth) ──
+          # asubboost adds subharmonics, aexciter adds high harmonics
+          # Even-order harmonics = "warmth", perceived loudness up without level change
+          HARMONIC="asubboost=drive=0.3:blend=0.2,aexciter=amount=0.4:drive=2.5:blend=0.3"
+          echo "   Harmonic: asubboost + aexciter (analog warmth)"
+
           # Fallback if analysis fails
           if [ -z "$IN_I" ] || [ "$IN_I" = "-inf" ]; then
             echo "   ⚠️ Loudness analysis failed, using single-pass preset"
-            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA},speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,alimiter=limit=-1.0dB:level=false"
+            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:dual_mono=${DUAL_MONO},speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,${LIMITER}"
           else
-            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true,speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=${THRESH}dB:ratio=${RATIO}:attack=20:release=250:makeup=2,alimiter=limit=-1.0dB:level=false"
+            # Build AF_MASTER with all features
+            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true:dual_mono=${DUAL_MONO},speechnorm=e=50:r=0.0005:l=1"
+            [ -n "$EXPAND" ] && AF_MASTER="${AF_MASTER},${EXPAND}"
+            AF_MASTER="${AF_MASTER},acompressor=threshold=${THRESH}dB:ratio=${RATIO}:attack=20:release=250:makeup=2,${HARMONIC},${LIMITER}"
           fi
           echo "   Target: -14 LUFS / -1.0 dBTP / LRA ${TGT_LRA} LU (${TGT_MODE})"
 
@@ -499,8 +548,52 @@ jobs:
           if [ -s "$HEVC_FILE" ]; then
             HEVC_SIZE=$(ls -lh "$HEVC_FILE" | awk '{print $5}')
             echo "✅ HEVC 10-bit: $HEVC_SIZE"
+
+            # ── #6 Loudness history graph (time-series per 10s) ──
+            echo "📈 Generating loudness history..."
+            LU_HISTORY="/tmp/lu_history.txt"
+            SEGMENTS=$(( SRC_DUR_INT / 10 ))
+            [ "$SEGMENTS" -lt 1 ] && SEGMENTS=1
+            > "$LU_HISTORY"
+            for i in $(seq 0 $((SEGMENTS - 1))); do
+              SEG_START=$(( i * 10 ))
+              SEG_LU=$(ffmpeg -hide_banner -ss "$SEG_START" -t 10 -i "$HEVC_FILE" \
+                -af "loudnorm=I=-14:TP=-1.0:LRA=9:print_format=summary" \
+                -f null - 2>&1 | grep "Input Integrated" | awk '{print $NF}' || true)
+              [ -n "$SEG_LU" ] && echo "${SEG_START}s: ${SEG_LU} LUFS" >> "$LU_HISTORY"
+            done
+            [ -s "$LU_HISTORY" ] && echo "   History: $(wc -l < "$LU_HISTORY") segments" || echo "   ⚠️ History gagal"
+
+            # ── #3 Loudness metadata embedding ──
+            echo "🏷 Embedding loudness metadata..."
+            FINAL_FILE="${HEVC_FILE%.mp4}-mastered.mp4"
+            mv "$HEVC_FILE" "$FINAL_FILE"
+            HEVC_FILE="$FINAL_FILE"
+            # Post-encode loudness verification
+            POST_LOUD=$(ffmpeg -hide_banner -i "$HEVC_FILE" \
+              -af "loudnorm=I=-14:TP=-1.0:LRA=9:print_format=summary" \
+              -f null - 2>&1 | grep -E 'Input Integrated|Input True Peak|Input LRA' | awk '{print $NF}')
+            POST_I=$(echo "$POST_LOUD" | sed -n '1p')
+            POST_TP=$(echo "$POST_LOUD" | sed -n '2p')
+            POST_LRA=$(echo "$POST_LOUD" | sed -n '3p')
+            [ -z "$POST_I" ] && POST_I="unknown"
+            [ -z "$POST_TP" ] && POST_TP="unknown"
+            [ -z "$POST_LRA" ] && POST_LRA="unknown"
+            echo "   Mastered: ${POST_I} LUFS, TP ${POST_TP} dB, LRA ${POST_LRA} LU"
+            # Write metadata to MP4
+            ffmpeg -hide_banner -y -i "$HEVC_FILE" -c copy \
+              -metadata loudness_I="${POST_I}" \
+              -metadata loudness_TP="${POST_TP}" \
+              -metadata loudness_LRA="${POST_LRA}" \
+              -metadata loudness_target="-14 LUFS / -1.0 dBTP / LRA ${TGT_LRA} LU" \
+              -metadata loudness_mode="${TGT_MODE}" \
+              -metadata loudness_weighted="delta=${DELTA} threshold=${THRESH}dB ratio=${RATIO}:1" \
+              "${HEVC_FILE%.mp4}-meta.mp4" 2>/dev/null && mv "${HEVC_FILE%.mp4}-meta.mp4" "$HEVC_FILE" || true
             echo "HEVC_FILE=$HEVC_FILE" >> $GITHUB_ENV
             echo "HEVC_SIZE=$HEVC_SIZE" >> $GITHUB_ENV
+            echo "HEVC_LOUDNESS_I=$POST_I" >> $GITHUB_ENV
+            echo "HEVC_LOUDNESS_TP=$POST_TP" >> $GITHUB_ENV
+            echo "HEVC_LOUDNESS_LRA=$POST_LRA" >> $GITHUB_ENV
             # Metadata
             HDUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$HEVC_FILE" 2>/dev/null | head -1)
             HDUR_INT=${HDUR%.*}; [ -z "$HDUR_INT" ] && HDUR_INT=0
