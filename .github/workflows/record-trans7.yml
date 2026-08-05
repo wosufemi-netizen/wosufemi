@@ -376,6 +376,17 @@ jobs:
           RATIO=$(awk "BEGIN{printf \"%.1f\", ${RATIO_NUM}/10}")
           echo "   Loudness-weighted: delta=${DELTA} LU → threshold=${THRESH}dB ratio=${RATIO}:1"
 
+          # ── #2 Loudness-based bitrate allocation ──
+          # Source at -14 LUFS → 128k (less data needed, already clean)
+          # Source at -20 LUFS → 256k (preserve low-level detail)
+          # Clamped 96k–320k
+          TGT_LU=-14
+          BITSTEP=$(awk "BEGIN{d=$IN_I_INT - $TGT_LU; if(d<0)d=-d; printf \"%.0f\", d * 12}")
+          ABR=$(( 160 - BITSTEP ))
+          [ "$ABR" -lt 96 ] && ABR=96
+          [ "$ABR" -gt 320 ] && ABR=320
+          echo "   Adaptive bitrate: ${ABR}k (source ${IN_I_INT} LUFS → target ${TGT_LU})"
+
           # ── #1 True peak limiting 8x oversampling ──
           # alimiter with 8x oversampling catches inter-sample peaks missed at 1x
           LIMITER="alimiter=limit=-1.0dB:level=8x"
@@ -422,16 +433,22 @@ jobs:
           HARMONIC="asubboost=drive=0.3:blend=0.2,aexciter=amount=0.4:drive=2.5:blend=0.3"
           echo "   Harmonic: asubboost + aexciter (analog warmth)"
 
-          # Fallback if analysis fails
+          # ── Build AF_MASTER chain (core filters, no resampling) ──
           if [ -z "$IN_I" ] || [ "$IN_I" = "-inf" ]; then
             echo "   ⚠️ Loudness analysis failed, using single-pass preset"
-            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:dual_mono=${DUAL_MONO},speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,${LIMITER}"
+            AF_MASTER_CHAIN="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:dual_mono=${DUAL_MONO},speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,${HARMONIC},${LIMITER}"
           else
-            # Build AF_MASTER with all features
-            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true:dual_mono=${DUAL_MONO},speechnorm=e=50:r=0.0005:l=1"
-            [ -n "$EXPAND" ] && AF_MASTER="${AF_MASTER},${EXPAND}"
-            AF_MASTER="${AF_MASTER},acompressor=threshold=${THRESH}dB:ratio=${RATIO}:attack=20:release=250:makeup=2,${HARMONIC},${LIMITER}"
+            AF_MASTER_CHAIN="loudnorm=I=-14:TP=-1.0:LRA=${TGT_LRA}:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true:dual_mono=${DUAL_MONO},speechnorm=e=50:r=0.0005:l=1"
+            [ -n "$EXPAND" ] && AF_MASTER_CHAIN="${AF_MASTER_CHAIN},${EXPAND}"
+            AF_MASTER_CHAIN="${AF_MASTER_CHAIN},acompressor=threshold=${THRESH}dB:ratio=${RATIO}:attack=20:release=250:makeup=2,${HARMONIC},${LIMITER}"
           fi
+
+          # ── #5 Loudness-weighted resampling (96k analysis → 48k output) ──
+          # aresample at 96kHz for more accurate loudnorm analysis,
+          # then aresample back to 48kHz for compact output
+          AF_MASTER="aresample=96000:filter_size=256:phase_shift=0,${AF_MASTER_CHAIN},aresample=48000:filter_size=256:phase_shift=0"
+          echo "   Resampling: 96k analysis → 48k output"
+
           echo "   Target: -14 LUFS / -1.0 dBTP / LRA ${TGT_LRA} LU (${TGT_MODE})"
 
           # ── #4 Loudness meter overlay ──
@@ -491,7 +508,7 @@ jobs:
                 "${MAP_OPTS[@]}" \
                 -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le \
                 -crf 28 -preset fast -tag:v hvc1 \
-                -c:a aac -b:a 192k -ar 48000 \
+                -c:a aac -b:a ${ABR}k -ar 48000 \
                 -progress pipe:1 \
                 "$HEVC_FILE" 2>/dev/null
             ) | while IFS='=' read -r k v; do
@@ -518,7 +535,7 @@ jobs:
                 -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le \
                 -crf 28 -preset fast -tag:v hvc1 \
                 -af "$AF_MASTER" \
-                -c:a aac -b:a 192k -ar 48000 \
+                -c:a aac -b:a ${ABR}k -ar 48000 \
                 -progress pipe:1 \
                 "$HEVC_FILE" 2>/dev/null
             ) | while IFS='=' read -r k v; do
