@@ -32,6 +32,18 @@ hevc_res = os.environ.get("HEVC_RES", "") or resolution
 hevc_codec = os.environ.get("HEVC_VCODEC", "") or "hevc"
 hevc_br = os.environ.get("HEVC_VBITRATE", "") or "?"
 hevc_dur = os.environ.get("HEVC_DUR", "") or real_duration
+hevc_loud_i = os.environ.get("HEVC_LOUDNESS_I", "") or "?"
+hevc_loud_tp = os.environ.get("HEVC_LOUDNESS_TP", "") or "?"
+hevc_loud_lra = os.environ.get("HEVC_LOUDNESS_LRA", "") or "?"
+hevc_acodec = os.environ.get("HEVC_ACODEC", "") or "?"
+hevc_abr_raw = os.environ.get("HEVC_ABR", "") or "0"
+try:
+    hevc_abr_kbps = f"{int(hevc_abr_raw)//1000}kbps" if hevc_abr_raw else "?"
+except ValueError:
+    hevc_abr_kbps = "?"
+hevc_asr = os.environ.get("HEVC_ASR", "") or "?"
+hevc_ach = os.environ.get("HEVC_ACH", "") or "?"
+hevc_comp = os.environ.get("HEVC_COMP_RATIO", "") or "?"
 
 run_url = f"{server_url}/{repo}/actions/runs/{run_id}"
 release_url = f"https://github.com/{repo}/releases/tag/{tag}" if tag else ""
@@ -216,14 +228,37 @@ if job_status == "success":
         if hevc_file and os.path.isfile(hevc_file) and os.path.getsize(hevc_file) > 0:
             print("📤 Mengirim video HEVC 10-bit...", flush=True)
             hevc_thumb_path = hevc_thumb_file if (has_hevc_thumb and os.path.isfile(hevc_thumb_file)) else ""
+            # Loudness grade
+            loud_emoji = "✅"
+            try:
+                li = float(hevc_loud_i)
+                if abs(li - (-14)) > 2: loud_emoji = "⚠️"
+                if abs(li - (-14)) > 4: loud_emoji = "❌"
+            except ValueError:
+                pass
+            # Audio quality grade
+            audio_grade = "?"
+            try:
+                abr = int(hevc_abr_raw)
+                if abr >= 256000: audio_grade = "A (high)"
+                elif abr >= 160000: audio_grade = "B (good)"
+                elif abr >= 128000: audio_grade = "C+ (acceptable)"
+                elif abr >= 96000: audio_grade = "C (standard)"
+                else: audio_grade = "D (low)"
+            except ValueError:
+                pass
+
             caption_hevc = (
-                f"🎞 <b>HEVC 10-bit</b>\n\n"
-                f"📦 File: <code>{hevc_file}</code>\n"
-                f"📏 Size: {hevc_size}\n"
-                f"⏱ Durasi: {hevc_dur}\n"
-                f"🖥 Resolusi: {hevc_res}\n"
-                f"🎞 Codec: {hevc_codec}\n"
-                f"📶 Bitrate: {hevc_br}"
+                f"🎞 <b>HEVC 10-bit + Audio Mastered</b>\n\n"
+                f"📦 <code>{hevc_file}</code>\n"
+                f"📏 Size: {hevc_size} | ⏱ {hevc_dur} | 🖥 {hevc_res}\n"
+                f"🎞 Video: {hevc_codec} @ {hevc_br} | 🗜 Ratio: {hevc_comp}:1\n\n"
+                f"🔊 <b>Loudness:</b>\n"
+                f"  {loud_emoji} {hevc_loud_i} LUFS (target -14)\n"
+                f"  📊 TP {hevc_loud_tp} dB | LRA {hevc_loud_lra} LU\n\n"
+                f"🎵 <b>Audio:</b>\n"
+                f"  {hevc_acodec} | {hevc_abr_kbps} | {hevc_asr}Hz | {hevc_ach}ch\n"
+                f"  Grade: {audio_grade}\n"
             )
             send_video_with_fallback(hevc_file, caption_hevc, hevc_thumb_path)
 

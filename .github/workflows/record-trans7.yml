@@ -602,13 +602,13 @@ jobs:
             # Post-encode loudness verification
             POST_LOUD=$(ffmpeg -hide_banner -i "$HEVC_FILE" \
               -af "loudnorm=I=-14:TP=-1.0:LRA=9:print_format=summary" \
-              -f null - 2>&1 | grep -E 'Input Integrated|Input True Peak|Input LRA' | awk '{print $NF}')
+              -f null - 2>&1 | grep -E 'Input Integrated|Input True Peak|Input LRA' | awk '{print $3}')
             POST_I=$(echo "$POST_LOUD" | sed -n '1p')
             POST_TP=$(echo "$POST_LOUD" | sed -n '2p')
             POST_LRA=$(echo "$POST_LOUD" | sed -n '3p')
-            [ -z "$POST_I" ] && POST_I="unknown"
-            [ -z "$POST_TP" ] && POST_TP="unknown"
-            [ -z "$POST_LRA" ] && POST_LRA="unknown"
+            [ -z "$POST_I" ] && POST_I="?"
+            [ -z "$POST_TP" ] && POST_TP="?"
+            [ -z "$POST_LRA" ] && POST_LRA="?"
             echo "   Mastered: ${POST_I} LUFS, TP ${POST_TP} dB, LRA ${POST_LRA} LU"
             # Write metadata to MP4
             ffmpeg -hide_banner -y -i "$HEVC_FILE" -c copy \
@@ -624,6 +624,25 @@ jobs:
             echo "HEVC_LOUDNESS_I=$POST_I" >> $GITHUB_ENV
             echo "HEVC_LOUDNESS_TP=$POST_TP" >> $GITHUB_ENV
             echo "HEVC_LOUDNESS_LRA=$POST_LRA" >> $GITHUB_ENV
+            # Audio metadata for quality report
+            HEVC_ACODEC=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$HEVC_FILE" 2>/dev/null | head -1)
+            HEVC_ABR=$(ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "$HEVC_FILE" 2>/dev/null | head -1)
+            HEVC_ASR=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of default=noprint_wrappers=1:nokey=1 "$HEVC_FILE" 2>/dev/null | head -1)
+            HEVC_ACH=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$HEVC_FILE" 2>/dev/null | head -1)
+            echo "HEVC_ACODEC=$HEVC_ACODEC" >> $GITHUB_ENV
+            echo "HEVC_ABR=$HEVC_ABR" >> $GITHUB_ENV
+            echo "HEVC_ASR=$HEVC_ASR" >> $GITHUB_ENV
+            echo "HEVC_ACH=$HEVC_ACH" >> $GITHUB_ENV
+            # Compression ratio
+            ORIG_BYTES_INT=${{ env.ORIG_BYTES }}
+            HEVC_BYTES=$(stat -c%s "$HEVC_FILE" 2>/dev/null || echo 0)
+            if [ "$HEVC_BYTES" -gt 0 ] 2>/dev/null; then
+              COMP_RATIO=$(awk "BEGIN{printf \"%.1f\", ${ORIG_BYTES_INT}/${HEVC_BYTES}}")
+            else
+              COMP_RATIO="?"
+            fi
+            echo "HEVC_COMP_RATIO=$COMP_RATIO" >> $GITHUB_ENV
+            echo "   Audio: ${HEVC_ACODEC} ${HEVC_ABR:-?}bps ${HEVC_ASR:-?}Hz ${HEVC_ACH:-?}ch | Ratio: ${COMP_RATIO}:1"
             # Metadata
             HDUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$HEVC_FILE" 2>/dev/null | head -1)
             HDUR_INT=${HDUR%.*}; [ -z "$HDUR_INT" ] && HDUR_INT=0
@@ -670,6 +689,14 @@ jobs:
           HEVC_DUR: ${{ env.HEVC_DUR }}
           HEVC_THUMB_FILE: ${{ env.HEVC_THUMB_FILE }}
           HAS_HEVC_THUMB: ${{ env.HAS_HEVC_THUMB }}
+          HEVC_LOUDNESS_I: ${{ env.HEVC_LOUDNESS_I }}
+          HEVC_LOUDNESS_TP: ${{ env.HEVC_LOUDNESS_TP }}
+          HEVC_LOUDNESS_LRA: ${{ env.HEVC_LOUDNESS_LRA }}
+          HEVC_ACODEC: ${{ env.HEVC_ACODEC }}
+          HEVC_ABR: ${{ env.HEVC_ABR }}
+          HEVC_ASR: ${{ env.HEVC_ASR }}
+          HEVC_ACH: ${{ env.HEVC_ACH }}
+          HEVC_COMP_RATIO: ${{ env.HEVC_COMP_RATIO }}
           TG_API_URL: "http://localhost:8081"
           PHASE: hevc
         run: python3 scripts/notify.py
