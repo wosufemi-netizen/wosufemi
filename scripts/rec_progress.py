@@ -12,6 +12,13 @@ Env vars:
 import json, os, subprocess, sys, threading, time, urllib.request
 from datetime import datetime, timedelta, timezone
 
+# Import token generator for 403 retry
+import importlib.util
+_spec = importlib.util.spec_from_file_location("gen_trans7_token",
+    os.path.join(os.path.dirname(__file__), "gen_trans7_token.py"))
+_gen_tk = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_gen_tk)
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID", "")
 DURATION = int(os.environ.get("DURATION", "300"))
