@@ -329,6 +329,27 @@ jobs:
           [ "$SRC_DUR_INT" -le 0 ] && SRC_DUR_INT=60
 
           echo "🎞 Encoding HEVC 10-bit (main10, yuv420p10le, CRF 28)..."
+          echo "🎚 Audio mastering: loudnorm 2-pass + speechnorm + compressor + limiter..."
+
+          # ── PASS 1: Analyze loudness ──
+          echo "📊 Analyzing audio loudness (pass 1)..."
+          LOUD_JSON=$(ffmpeg -hide_banner -i "$FILE" \
+            -af "loudnorm=I=-14:TP=-1.0:LRA=9:print_format=json" \
+            -f null - 2>&1 | tail -20 | grep -A 12 '{')
+          IN_I=$(echo "$LOUD_JSON" | grep 'input_i' | sed 's/.*: *"//' | sed 's/".*//')
+          IN_TP=$(echo "$LOUD_JSON" | grep 'input_tp' | sed 's/.*: *"//' | sed 's/".*//')
+          IN_LRA=$(echo "$LOUD_JSON" | grep 'input_lra' | sed 's/.*: *"//' | sed 's/".*//')
+          IN_THRESH=$(echo "$LOUD_JSON" | grep 'input_thresh' | sed 's/.*: *"//' | sed 's/".*//')
+          echo "   Input: ${IN_I} LUFS, TP ${IN_TP} dB, LRA ${IN_LRA} LU"
+
+          # Fallback if analysis fails
+          if [ -z "$IN_I" ] || [ "$IN_I" = "-inf" ]; then
+            echo "   ⚠️ Loudness analysis failed, using single-pass preset"
+            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=9,speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,alimiter=limit=-1.0dB:level=false"
+          else
+            AF_MASTER="loudnorm=I=-14:TP=-1.0:LRA=9:measured_I=${IN_I}:measured_TP=${IN_TP}:measured_LRA=${IN_LRA}:measured_thresh=${IN_THRESH}:linear=true,speechnorm=e=50:r=0.0005:l=1,acompressor=threshold=-18dB:ratio=2.5:attack=20:release=250:makeup=2,alimiter=limit=-1.0dB:level=false"
+          fi
+          echo "   Target: -14 LUFS / -1.0 dBTP / LRA 9 LU"
 
           # Progress bar
           CHAT_ID="$CHAT_ID" FILENAME="$FILE" TG_API_URL="$TG_API_URL" \
@@ -339,7 +360,8 @@ jobs:
           ffmpeg -hide_banner -y -i "$FILE" \
             -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le \
             -crf 28 -preset fast -tag:v hvc1 \
-            -c:a copy \
+            -af "$AF_MASTER" \
+            -c:a aac -b:a 192k -ar 48000 \
             -progress pipe:1 \
             "$HEVC_FILE" 2>/dev/null | while IFS='=' read -r k v; do
             if [ "$k" = "out_time_ms" ]; then
@@ -381,6 +403,17 @@ jobs:
             # SHA256 hash for HEVC integrity
             HEVC_SHA256=$(sha256sum "$HEVC_FILE" | cut -d" " -f1)
             echo "HEVC_SHA256=$HEVC_SHA256" >> $GITHUB_ENV
+            # Post-encode loudness verification
+            POST_LOUD=$(ffmpeg -hide_banner -i "$HEVC_FILE" \
+              -af "loudnorm=I=-14:TP=-1.0:LRA=9:print_format=summary" \
+              -f null - 2>&1 | grep -E 'Input Integrated|Input True Peak' | awk '{print $NF}')
+            if [ -n "$POST_LOUD" ]; then
+              POST_I=$(echo "$POST_LOUD" | head -1)
+              POST_TP=$(echo "$POST_LOUD" | tail -1)
+              echo "   Mastered: ${POST_I} LUFS, TP ${POST_TP} dB"
+              echo "HEVC_LOUDNESS_I=$POST_I" >> $GITHUB_ENV
+              echo "HEVC_LOUDNESS_TP=$POST_TP" >> $GITHUB_ENV
+            fi
             # Thumbnail HEVC
             HEVC_THUMB="${HEVC_FILE%.mp4}.jpg"
             HSEEK=1; [ "$HDUR_INT" -gt 6 ] && HSEEK=$((HDUR_INT / 2))
