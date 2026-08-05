@@ -205,9 +205,11 @@ def run_ffmpeg(url, label):
     rec_start = time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
+    stderr_lines = []
     def drain():
         for l in proc.stderr:
             s = l.strip()
+            stderr_lines.append(s)
             if s and "=" not in s.split(":", 1)[0]:
                 print("[ffmpeg] {}".format(s), file=sys.stderr, flush=True)
 
@@ -215,7 +217,54 @@ def run_ffmpeg(url, label):
     et.start()
     proc.wait()
     et.join(timeout=5)
-    return proc.returncode == 0 and os.path.isfile(OUT) and os.path.getsize(OUT) > 0
+
+    stderr_text = "\n".join(stderr_lines)
+    had_403 = "403" in stderr_text and "Forbidden" in stderr_text
+    if had_403:
+        print("[ffmpeg] 403 Forbidden detected in stderr", flush=True)
+    success = proc.returncode == 0 and os.path.isfile(OUT) and os.path.getsize(OUT) > 0
+    return success, had_403
+
+
+def regenerate_fresh_url():
+    """Generate fresh token, fetch playlist, resolve 720p chunklist URL."""
+    url, _, _ = _gen_tk.generate_token_url()
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://20.detik.com/",
+        "Origin": "https://20.detik.com",
+    })
+    body = urllib.request.urlopen(req, timeout=30).read().decode()
+    if "#EXTM3U" not in body:
+        raise RuntimeError("Not a valid HLS playlist")
+
+    lines = body.split("\n")
+    chunk = None
+    want_720 = False
+    for line in lines:
+        line = line.strip()
+        if "RESOLUTION=1280x720" in line:
+            want_720 = True
+        elif want_720 and line and not line.startswith("#"):
+            chunk = line
+            break
+    if not chunk:
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                chunk = line
+                break
+    if not chunk:
+        raise RuntimeError("No chunklist found in playlist")
+
+    if not chunk.startswith("http"):
+        base = url.rsplit("/", 1)[0]
+        chunk = base + "/" + chunk
+
+    if "<html" in chunk.lower() or "forbidden" in chunk.lower():
+        raise RuntimeError("Chunklist looks like error page: {}".format(chunk[:100]))
+
+    return chunk
 
 
 def main():
@@ -228,11 +277,29 @@ def main():
 
     success = False
     try:
-        success = run_ffmpeg(M3U8_URL, "primary")
-        if not success and CHUNK_URL:
-            print("[ffmpeg] Retrying with chunklist...", flush=True)
-            tg_edit("\U0001f504 <b>Rekam</b>\n\n\u26a0\ufe0f Retry chunklist...")
-            success = run_ffmpeg(CHUNK_URL, "chunklist")
+        MAX_RETRIES = 3
+        current_url = M3U8_URL
+        for attempt in range(1, MAX_RETRIES + 1):
+            success, had_403 = run_ffmpeg(current_url, "attempt-{}".format(attempt))
+            if success:
+                break
+            if had_403 and attempt < MAX_RETRIES:
+                print("[ffmpeg] 403 at attempt {}, regenerating fresh token...".format(attempt), flush=True)
+                tg_edit("\u26a0\ufe0f 403 Forbidden — regenerating token\n(retry {}/{})".format(attempt, MAX_RETRIES - 1))
+                time.sleep(30)
+                try:
+                    current_url = regenerate_fresh_url()
+                    print("[ffmpeg] Fresh chunklist: {}".format(current_url[:100]), flush=True)
+                except Exception as e:
+                    print("[ffmpeg] Token refresh failed: {}".format(e), flush=True)
+                    break
+            elif not success and CHUNK_URL:
+                print("[ffmpeg] Non-403 failure, retrying with original chunklist...", flush=True)
+                tg_edit("\U0001f504 <b>Rekam</b>\n\n\u26a0\ufe0f Retry chunklist...")
+                success, _ = run_ffmpeg(CHUNK_URL, "chunklist")
+                break
+            else:
+                break
     finally:
         ffmpeg_done.set()
         mon.join(timeout=10)

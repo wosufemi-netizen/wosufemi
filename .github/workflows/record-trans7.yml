@@ -381,11 +381,14 @@ jobs:
           # Source at -20 LUFS → 256k (preserve low-level detail)
           # Clamped 96k–320k
           TGT_LU=-14
-          BITSTEP=$(awk "BEGIN{d=$IN_I_INT - $TGT_LU; if(d<0)d=-d; printf \"%.0f\", d * 12}")
-          ABR=$(( 160 - BITSTEP ))
-          [ "$ABR" -lt 96 ] && ABR=96
-          [ "$ABR" -gt 320 ] && ABR=320
-          echo "   Adaptive bitrate: ${ABR}k (source ${IN_I_INT} LUFS → target ${TGT_LU})"
+          ABR=192  # default fallback
+          if [ -n "$IN_I_INT" ]; then
+            BITSTEP=$(awk "BEGIN{d=$IN_I_INT - $TGT_LU; if(d<0)d=-d; printf \"%.0f\", d * 12}")
+            ABR=$(( 160 - BITSTEP ))
+            [ "$ABR" -lt 96 ] && ABR=96
+            [ "$ABR" -gt 320 ] && ABR=320
+          fi
+          echo "   Adaptive bitrate: ${ABR}k (source ${IN_I_INT:--20} LUFS → target ${TGT_LU})"
 
           # ── #1 True peak limiting 8x oversampling ──
           # alimiter with 8x oversampling catches inter-sample peaks missed at 1x
@@ -454,25 +457,14 @@ jobs:
           echo "   Target: -14 LUFS / -1.0 dBTP / LRA ${TGT_LRA} LU (${TGT_MODE})"
 
           # ── #4 Loudness meter overlay ──
-          # Generate LUFS graph video for later overlay
-          echo "📊 Generating loudness meter overlay..."
-          LU_GRAPH="/tmp/lu_graph.mp4"
-          ffmpeg -hide_banner -y -i "$FILE" \
-            -filter_complex "[0:a]ebur128=video=1:size=320x180:meter=9:gauge=shortterm:scale=LUFS:target=-14[lu]" \
-            -map "[lu]" -c:v libx264 -preset ultrafast -crf 30 -pix_fmt yuv420p \
-            -t "$SRC_DUR_INT" "$LU_GRAPH" 2>/dev/null || true
+          # Disabled — ebur128=video=1 not stable in Ubuntu ffmpeg 6.1.1
           HAS_LU_OVERLAY=0
-          [ -s "$LU_GRAPH" ] && HAS_LU_OVERLAY=1 && echo "   ✅ Loudness overlay: $LU_GRAPH" || echo "   ⚠️ Loudness overlay gagal"
+          echo "   Loudness overlay: disabled (ffmpeg 6.1.1 compat)"
 
           # ── #2 Binaural audio ──
-          # headphone filter with HRTF for immersive 3D audio (headphone optimized)
-          echo "🎧 Preparing binaural audio (HRTF)..."
-          BINAURAL_FILE="/tmp/binaural.wav"
-          ffmpeg -hide_banner -y -i "$FILE" \
-            -af "headphone=map=FL|FR:hrir=default" \
-            -c:a pcm_s16le -ar 48000 -ac 2 "$BINAURAL_FILE" 2>/dev/null || true
+          # Disabled — headphone/HRTF not stable in Ubuntu ffmpeg 6.1.1
           HAS_BINAURAL=0
-          [ -s "$BINAURAL_FILE" ] && HAS_BINAURAL=1 && echo "   ✅ Binaural: $BINAURAL_FILE" || echo "   ⚠️ Binaural gagal, fallback stereo"
+          echo "   Binaural: disabled (ffmpeg 6.1.1 compat)"
 
           # Progress bar
           CHAT_ID="$CHAT_ID" FILENAME="$FILE" TG_API_URL="$TG_API_URL" \
@@ -571,17 +563,20 @@ jobs:
             # ── #6 Loudness history graph (time-series per 10s) ──
             echo "📈 Generating loudness history..."
             LU_HISTORY="/tmp/lu_history.txt"
-            SEGMENTS=$(( SRC_DUR_INT / 10 ))
+            MAX_SEG=30
+            SEG_DUR=$(( (SRC_DUR_INT + MAX_SEG - 1) / MAX_SEG ))
+            [ "$SEG_DUR" -lt 5 ] && SEG_DUR=5
+            SEGMENTS=$(( SRC_DUR_INT / SEG_DUR ))
             [ "$SEGMENTS" -lt 1 ] && SEGMENTS=1
             > "$LU_HISTORY"
             for i in $(seq 0 $((SEGMENTS - 1))); do
-              SEG_START=$(( i * 10 ))
-              SEG_LU=$(ffmpeg -hide_banner -ss "$SEG_START" -t 10 -i "$HEVC_FILE" \
+              SEG_START=$(( i * SEG_DUR ))
+              SEG_LU=$(ffmpeg -hide_banner -ss "$SEG_START" -t "$SEG_DUR" -i "$HEVC_FILE" \
                 -af "loudnorm=I=-14:TP=-1.0:LRA=9:print_format=summary" \
                 -f null - 2>&1 | grep "Input Integrated" | awk '{print $NF}' || true)
               [ -n "$SEG_LU" ] && echo "${SEG_START}s: ${SEG_LU} LUFS" >> "$LU_HISTORY"
             done
-            [ -s "$LU_HISTORY" ] && echo "   History: $(wc -l < "$LU_HISTORY") segments" || echo "   ⚠️ History gagal"
+            [ -s "$LU_HISTORY" ] && echo "   History: $(wc -l < "$LU_HISTORY") segments (every ${SEG_DUR}s)" || echo "   ⚠️ History gagal"
 
             # ── #3 Loudness metadata embedding ──
             echo "🏷 Embedding loudness metadata..."
@@ -625,17 +620,6 @@ jobs:
             # SHA256 hash for HEVC integrity
             HEVC_SHA256=$(sha256sum "$HEVC_FILE" | cut -d" " -f1)
             echo "HEVC_SHA256=$HEVC_SHA256" >> $GITHUB_ENV
-            # Post-encode loudness verification
-            POST_LOUD=$(ffmpeg -hide_banner -i "$HEVC_FILE" \
-              -af "loudnorm=I=-14:TP=-1.0:LRA=9:print_format=summary" \
-              -f null - 2>&1 | grep -E 'Input Integrated|Input True Peak' | awk '{print $NF}')
-            if [ -n "$POST_LOUD" ]; then
-              POST_I=$(echo "$POST_LOUD" | head -1)
-              POST_TP=$(echo "$POST_LOUD" | tail -1)
-              echo "   Mastered: ${POST_I} LUFS, TP ${POST_TP} dB"
-              echo "HEVC_LOUDNESS_I=$POST_I" >> $GITHUB_ENV
-              echo "HEVC_LOUDNESS_TP=$POST_TP" >> $GITHUB_ENV
-            fi
             # Thumbnail HEVC
             HEVC_THUMB="${HEVC_FILE%.mp4}.jpg"
             HSEEK=1; [ "$HDUR_INT" -gt 6 ] && HSEEK=$((HDUR_INT / 2))
