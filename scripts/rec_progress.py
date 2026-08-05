@@ -140,7 +140,16 @@ def monitor_progress():
     progress_msg_id = tg_send(build_status_msg(0))
     last_pos = 0
     last_pct = -1
-    last_update = time.time()
+    last_update = 0.0  # 0 = force first update immediately
+
+    # Adaptive: aim for ~10 updates total, clamped to 15s–120s interval.
+    # Short rec (5m): update every 30s. Long rec (1h): every 120s.
+    interval = max(15, min(120, DURATION // 10))
+    # Step: how many % per update. Clamp 5–15.
+    step = max(5, min(15, 100 // max(1, DURATION // interval or 1)))
+
+    print("[progress] interval={}s step={}% total_updates~{}".format(
+        interval, step, max(1, DURATION // interval)), flush=True)
 
     while not ffmpeg_done.is_set():
         ffmpeg_done.wait(timeout=3)
@@ -164,9 +173,14 @@ def monitor_progress():
         pct = min(int((current_sec / DURATION) * 100), 100) if DURATION > 0 else 0
         now_t = time.time()
 
-        # Update every 10%, minimum 60s gap
-        if pct >= last_pct + 10 and now_t - last_update >= 60 and current_sec > 0:
-            last_pct = (pct // 10) * 10
+        # Update when enough time AND enough progress passed.
+        # First update fires as soon as data flows (last_update == 0).
+        time_ok = last_update == 0 or now_t - last_update >= interval
+        pct_ok = pct >= last_pct + step
+        if time_ok and pct_ok and current_sec > 0:
+            last_pct = (pct // step) * step
+            if last_pct > 100:
+                last_pct = 100
             last_update = now_t
             tg_edit(build_status_msg(last_pct, int(current_sec)))
             print("[progress] {}% ({}/{})".format(last_pct, fmt_time(current_sec), fmt_time(DURATION)), flush=True)
