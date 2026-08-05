@@ -75,37 +75,53 @@ jobs:
             exit 1
           fi
 
-      # Step 3: Parse chunklist
+      # Step 3: Parse chunklist (with retry for CDN block)
       - name: Get chunklist URL
         id: chunklist
         if: steps.verify.outputs.http_code == '200'
         run: |
           URL="${{ steps.token.outputs.url }}"
-          BODY_FILE=$(mktemp)
-          curl -s -o "$BODY_FILE" \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
-            -H "Referer: https://20.detik.com/" \
-            -H "Origin: https://20.detik.com" \
-            "$URL"
-          cat "$BODY_FILE"
-          # Must be real HLS, not nginx/HTML body
-          if ! grep -q '#EXTM3U' "$BODY_FILE"; then
-            echo "::error::Body is not HLS playlist (#EXTM3U missing)"
-            head -c 400 "$BODY_FILE" || true
+          CHUNK=""
+          MAX_TRIES=3
+          for attempt in 1 2 3; do
+            BODY_FILE=$(mktemp)
+            HTTP_CODE=$(curl -s -o "$BODY_FILE" -w "%{http_code}" \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
+              -H "Referer: https://20.detik.com/" \
+              -H "Origin: https://20.detik.com" \
+              "$URL")
+            echo "   attempt $attempt: HTTP $HTTP_CODE, size=$(wc -c < "$BODY_FILE" | tr -d ' ')"
+
+            if grep -q '#EXTM3U' "$BODY_FILE"; then
+              # Prefer 720p (b744100 / 1280x720), else first media URI
+              cat "$BODY_FILE"
+              CHUNK=$(awk '
+                /RESOLUTION=1280x720/ { want=1; next }
+                want && $0 !~ /^#/ && NF { print; exit }
+              ' "$BODY_FILE")
+              [ -z "$CHUNK" ] && CHUNK=$(grep -v '^#' "$BODY_FILE" | grep -v '^$' | head -1)
+              rm -f "$BODY_FILE"
+              break
+            fi
+
+            # Not HLS — CDN returned error page. Regenerate token + retry
+            echo "   ::warning::attempt $attempt: body not HLS ($(head -c 120 "$BODY_FILE" || true))"
             rm -f "$BODY_FILE"
-            exit 1
-          fi
-          # Prefer 720p (b744100 / 1280x720), else first media URI
-          CHUNK=$(awk '
-            /RESOLUTION=1280x720/ { want=1; next }
-            want && $0 !~ /^#/ && NF { print; exit }
-          ' "$BODY_FILE")
+
+            if [ "$attempt" -lt "$MAX_TRIES" ]; then
+              echo "   ::notice::Regenerating token (30s cooldown)..."
+              sleep 30
+              TOKEN_URL=$(python scripts/gen_trans7_token.py 2>&1 | grep '^TOKEN_URL=' | cut -d= -f2-)
+              if [ -z "$TOKEN_URL" ]; then
+                echo "   ::error::Token regeneration failed at attempt $attempt"
+                exit 1
+              fi
+              URL="$TOKEN_URL"
+            fi
+          done
+
           if [ -z "$CHUNK" ]; then
-            CHUNK=$(grep -v '^#' "$BODY_FILE" | grep -v '^$' | head -1)
-          fi
-          rm -f "$BODY_FILE"
-          if [ -z "$CHUNK" ]; then
-            echo "::error::No chunklist found in playlist"
+            echo "::error::No chunklist found after $MAX_TRIES attempts"
             exit 1
           fi
           case "$CHUNK" in
@@ -390,10 +406,10 @@ jobs:
           fi
           echo "   Adaptive bitrate: ${ABR}k (source ${IN_I_INT:--20} LUFS → target ${TGT_LU})"
 
-          # ── #1 True peak limiting 8x oversampling ──
-          # alimiter with 8x oversampling catches inter-sample peaks missed at 1x
-          LIMITER="alimiter=limit=-1.0dB:level=8x"
-          echo "   True peak: 8x oversampling limiter"
+          # ── #1 True peak limiting ──
+          # alimiter: limit=-1.0dB, auto level on. No oversampling option in ffmpeg 6.1.1
+          LIMITER="alimiter=limit=-1.0dB:level=true"
+          echo "   True peak: alimiter -1.0 dB"
 
           # ── #2 Per-channel loudnorm (dual_mono) ──
           # loudnorm with dual_mono=true balances L/R channels separately
@@ -416,13 +432,13 @@ jobs:
           fi
 
           # ── #4 Dynamic range expansion (de-compand) ──
-          # If LRA < 4, source is over-compressed (broadcast) → expand
-          # If LRA > 10, source is dynamic → light compress
+          # If LRA < 4, source is over-compressed (broadcast) → gentle expansion
+          # acompressor ratio min=1, can't go below. Use compand for expansion.
           if [ -n "$IN_LRA" ]; then
             LRA_CHECK=${IN_LRA%.*}
             if [ "$LRA_CHECK" -lt 4 ]; then
               echo "   De-compand: LRA ${IN_LRA} < 4 → dynamic range expansion"
-              EXPAND="acompressor=threshold=-20dB:ratio=0.5:attack=20:release=250:makeup=1"
+              EXPAND="compand=attacks=0.01:decays=0.3:points=-80/-80|-30/-20|0/0"
             else
               EXPAND=""
             fi
