@@ -365,36 +365,112 @@ jobs:
           fi
           echo "   Target: -14 LUFS / -1.0 dBTP / LRA ${TGT_LRA} LU (${TGT_MODE})"
 
+          # ── #4 Loudness meter overlay ──
+          # Generate LUFS graph video for later overlay
+          echo "📊 Generating loudness meter overlay..."
+          LU_GRAPH="/tmp/lu_graph.mp4"
+          ffmpeg -hide_banner -y -i "$FILE" \
+            -filter_complex "[0:a]ebur128=video=1:size=320x180:meter=9:gauge=shortterm:scale=LUFS:target=-14[lu]" \
+            -map "[lu]" -c:v libx264 -preset ultrafast -crf 30 -pix_fmt yuv420p \
+            -t "$SRC_DUR_INT" "$LU_GRAPH" 2>/dev/null || true
+          HAS_LU_OVERLAY=0
+          [ -s "$LU_GRAPH" ] && HAS_LU_OVERLAY=1 && echo "   ✅ Loudness overlay: $LU_GRAPH" || echo "   ⚠️ Loudness overlay gagal"
+
+          # ── #2 Binaural audio ──
+          # headphone filter with HRTF for immersive 3D audio (headphone optimized)
+          echo "🎧 Preparing binaural audio (HRTF)..."
+          BINAURAL_FILE="/tmp/binaural.wav"
+          ffmpeg -hide_banner -y -i "$FILE" \
+            -af "headphone=map=FL|FR:hrir=default" \
+            -c:a pcm_s16le -ar 48000 -ac 2 "$BINAURAL_FILE" 2>/dev/null || true
+          HAS_BINAURAL=0
+          [ -s "$BINAURAL_FILE" ] && HAS_BINAURAL=1 && echo "   ✅ Binaural: $BINAURAL_FILE" || echo "   ⚠️ Binaural gagal, fallback stereo"
+
           # Progress bar
           CHAT_ID="$CHAT_ID" FILENAME="$FILE" TG_API_URL="$TG_API_URL" \
             BOT_TOKEN="$BOT_TOKEN" PROGRESS_MSG_FILE=/tmp/trans7_hevc_progress \
             python3 scripts/progress.py start || true
 
+          # Build filter_complex: binaural + loudness overlay
+          if [ "$HAS_BINAURAL" -eq 1 ] && [ "$HAS_LU_OVERLAY" -eq 1 ]; then
+            echo "🎬 Mode: binaural + loudness overlay"
+            FILTER_COMPLEX="[0:v]scale=1280:720[bg];[1:v]scale=320:180[lu];[bg][lu]overlay=W-w-16:H-h-16[v];[2:a]${AF_MASTER}[a]"
+            INPUTS=(-i "$FILE" -i "$LU_GRAPH" -i "$BINAURAL_FILE")
+            MAP_OPTS=(-map "[v]" -map "[a]")
+          elif [ "$HAS_BINAURAL" -eq 1 ]; then
+            echo "🎬 Mode: binaural only"
+            FILTER_COMPLEX="[1:a]${AF_MASTER}[a]"
+            INPUTS=(-i "$FILE" -i "$BINAURAL_FILE")
+            MAP_OPTS=(-map 0:v -map "[a]")
+          elif [ "$HAS_LU_OVERLAY" -eq 1 ]; then
+            echo "🎬 Mode: loudness overlay only"
+            FILTER_COMPLEX="[0:v]scale=1280:720[bg];[1:v]scale=320:180[lu];[bg][lu]overlay=W-w-16:H-h-16[v]"
+            INPUTS=(-i "$FILE" -i "$LU_GRAPH")
+            MAP_OPTS=(-map "[v]" -map 0:a)
+          else
+            echo "🎬 Mode: standard (no binaural, no overlay)"
+            FILTER_COMPLEX=""
+            INPUTS=(-i "$FILE")
+            MAP_OPTS=(-map 0:v -map 0:a)
+          fi
+
           LAST_PCT=-1; NEXT_SEND=0
-          ffmpeg -hide_banner -y -i "$FILE" \
-            -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le \
-            -crf 28 -preset fast -tag:v hvc1 \
-            -af "$AF_MASTER" \
-            -c:a aac -b:a 192k -ar 48000 \
-            -progress pipe:1 \
-            "$HEVC_FILE" 2>/dev/null | while IFS='=' read -r k v; do
-            if [ "$k" = "out_time_ms" ]; then
-              ms=${v%.*}
-              [ "$ms" -gt 0 ] 2>/dev/null || continue
-              cur=$(( ms / 1000000 ))
-              pct=$(( (cur * 100) / SRC_DUR_INT ))
-              [ "$pct" -gt 100 ] && pct=100
-              now=$(date +%s)
-              if [ "$pct" -ge "$((LAST_PCT + 10))" ] && [ "$now" -ge "$NEXT_SEND" ]; then
-                LAST_PCT=$(( (pct / 10) * 10 ))
-                NEXT_SEND=$(( now + 5 ))
-                echo "🔄 HEVC encode ${LAST_PCT}%"
-                CHAT_ID="$CHAT_ID" FILENAME="$FILE" TG_API_URL="$TG_API_URL" \
-                  BOT_TOKEN="$BOT_TOKEN" PROGRESS_MSG_FILE=/tmp/trans7_hevc_progress \
-                  python3 scripts/progress.py progress "$LAST_PCT" || true
+          if [ -n "$FILTER_COMPLEX" ]; then
+            (
+              ffmpeg -hide_banner -y "${INPUTS[@]}" \
+                -filter_complex "$FILTER_COMPLEX" \
+                "${MAP_OPTS[@]}" \
+                -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le \
+                -crf 28 -preset fast -tag:v hvc1 \
+                -c:a aac -b:a 192k -ar 48000 \
+                -progress pipe:1 \
+                "$HEVC_FILE" 2>/dev/null
+            ) | while IFS='=' read -r k v; do
+              if [ "$k" = "out_time_ms" ]; then
+                ms=${v%.*}
+                [ "$ms" -gt 0 ] 2>/dev/null || continue
+                cur=$(( ms / 1000000 ))
+                pct=$(( (cur * 100) / SRC_DUR_INT ))
+                [ "$pct" -gt 100 ] && pct=100
+                now=$(date +%s)
+                if [ "$pct" -ge "$((LAST_PCT + 10))" ] && [ "$now" -ge "$NEXT_SEND" ]; then
+                  LAST_PCT=$(( (pct / 10) * 10 ))
+                  NEXT_SEND=$(( now + 5 ))
+                  echo "🔄 HEVC encode ${LAST_PCT}%"
+                  CHAT_ID="$CHAT_ID" FILENAME="$FILE" TG_API_URL="$TG_API_URL" \
+                    BOT_TOKEN="$BOT_TOKEN" PROGRESS_MSG_FILE=/tmp/trans7_hevc_progress \
+                    python3 scripts/progress.py progress "$LAST_PCT" || true
+                fi
               fi
-            fi
-          done
+            done
+          else
+            (
+              ffmpeg -hide_banner -y -i "$FILE" \
+                -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le \
+                -crf 28 -preset fast -tag:v hvc1 \
+                -af "$AF_MASTER" \
+                -c:a aac -b:a 192k -ar 48000 \
+                -progress pipe:1 \
+                "$HEVC_FILE" 2>/dev/null
+            ) | while IFS='=' read -r k v; do
+              if [ "$k" = "out_time_ms" ]; then
+                ms=${v%.*}
+                [ "$ms" -gt 0 ] 2>/dev/null || continue
+                cur=$(( ms / 1000000 ))
+                pct=$(( (cur * 100) / SRC_DUR_INT ))
+                [ "$pct" -gt 100 ] && pct=100
+                now=$(date +%s)
+                if [ "$pct" -ge "$((LAST_PCT + 10))" ] && [ "$now" -ge "$NEXT_SEND" ]; then
+                  LAST_PCT=$(( (pct / 10) * 10 ))
+                  NEXT_SEND=$(( now + 5 ))
+                  echo "🔄 HEVC encode ${LAST_PCT}%"
+                  CHAT_ID="$CHAT_ID" FILENAME="$FILE" TG_API_URL="$TG_API_URL" \
+                    BOT_TOKEN="$BOT_TOKEN" PROGRESS_MSG_FILE=/tmp/trans7_hevc_progress \
+                    python3 scripts/progress.py progress "$LAST_PCT" || true
+                fi
+              fi
+            done
+          fi
 
           CHAT_ID="$CHAT_ID" FILENAME="$FILE" TG_API_URL="$TG_API_URL" \
             BOT_TOKEN="$BOT_TOKEN" PROGRESS_MSG_FILE=/tmp/trans7_hevc_progress \
