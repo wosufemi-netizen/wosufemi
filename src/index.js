@@ -97,19 +97,7 @@ export default {
       }
 
       if (text === "/status" || text.startsWith("/status ")) {
-        ctx.waitUntil(
-          tgSend(
-            env,
-            chatId,
-            [
-              "📊 <b>Status</b>",
-              `Repo: <code>${env.GH_OWNER}/${env.GH_REPO}</code>`,
-              "Record: Actions workflow <code>wosufemi-netizen</code>",
-              "Capture: Actions workflow <code>wosufemi</code>",
-              "Cek run: GitHub → Actions.",
-            ].join("\n")
-          )
-        );
+        ctx.waitUntil(handleStatus(env, chatId));
         return new Response("OK");
       }
 
@@ -148,6 +136,84 @@ export default {
     }
   },
 };
+
+async function handleStatus(env, chatId) {
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${env.GH_OWNER}/${env.GH_REPO}/actions/runs?status=in_progress&status=queued&per_page=10`,
+      {
+        headers: {
+          Authorization: `Bearer ${env.GH_TOKEN}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "wosufemi-worker",
+        },
+      }
+    );
+
+    if (!res.ok) {
+      await tgSend(env, chatId, `❌ GHA API error HTTP ${res.status}`);
+      return;
+    }
+
+    const data = await res.json();
+    const runs = data.workflow_runs || [];
+
+    if (runs.length === 0) {
+      await tgSend(env, chatId, "✅ Tidak ada proses aktif.");
+      return;
+    }
+
+    const now = new Date();
+    const wibOffset = 7 * 60 * 60 * 1000; // WIB = UTC+7
+
+    const lines = [`⏳ <b>${runs.length} proses aktif:</b>`, ""];
+
+    for (const run of runs) {
+      const created = new Date(run.created_at);
+      const elapsedMs = now - created;
+      const elapsedSec = Math.floor(elapsedMs / 1000);
+      const startWib = new Date(created.getTime() + wibOffset);
+
+      const h = Math.floor(elapsedSec / 3600);
+      const m = Math.floor((elapsedSec % 3600) / 60);
+      const s = elapsedSec % 60;
+
+      let elapsedStr;
+      if (h > 0) {
+        elapsedStr = `${h} jam ${m} menit`;
+      } else if (m > 0) {
+        elapsedStr = `${m} menit ${s} detik`;
+      } else {
+        elapsedStr = `${s} detik`;
+      }
+
+      const wibTime = startWib.toISOString().slice(11, 16); // HH:MM
+      const statusIcon = run.status === "queued" ? "⏳" : "🔄";
+      const stepLabel = run.name || run.display_title || "workflow";
+
+      // Hint for long-running HEVC encodes
+      let hint = "";
+      if (elapsedSec > 600 && run.name && run.name.toLowerCase().includes("trans7")) {
+        hint = "\n  ℹ️ Encode HEVC 1 jam media biasanya 15–25 menit.";
+      }
+
+      lines.push(
+        `• ${statusIcon} <b>${escapeHtml(stepLabel)}</b>`,
+        `  ⏱ ${elapsedStr} · mulai ${wibTime} WIB`,
+        `  🆔 Run: <code>${run.id}</code>`,
+        `  🔗 <a href="${run.html_url}">${run.html_url}</a>` + hint,
+        ""
+      );
+    }
+
+    lines.push("Gunakan /cancel untuk info pembatalan.");
+
+    await tgSend(env, chatId, lines.join("\n"));
+  } catch (e) {
+    await tgSend(env, chatId, `❌ Status error: ${escapeHtml(String(e.message || e))}`);
+  }
+}
 
 async function handleRecord(env, chatId, text) {
   // /record <url> [duration_seconds]
@@ -255,6 +321,10 @@ async function handleRecord(env, chatId, text) {
 async function handleChannel(env, chatId, text) {
   // /trans7 [duration] — default 5m (300s)
   const parts = text.split(/\s+/).filter(Boolean);
+  const cmd = parts[0].toLowerCase().replace("/", "");
+  // Map command to channel name
+  const CHANNEL_MAP = { trans7: "trans7", transtv: "transtv", cnn: "cnn", moji: "moji", cnbc: "cnbc" };
+  const channel = CHANNEL_MAP[cmd] || "trans7";
   let durationSec = 300;
   if (parts[1]) {
     const n = parseDuration(parts[1]);
@@ -400,6 +470,8 @@ function escapeHtml(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
 async function handleVerify(env, chatId, text) {
   const parts = text.split(/s+/).filter(Boolean);
   if (parts.length < 2) {
