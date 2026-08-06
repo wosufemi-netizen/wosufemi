@@ -93,32 +93,52 @@ def duration_label(sec):
     return "{}s".format(sec)
 
 
-def get_duration(filepath):
-    """Get actual media duration in seconds using ffprobe."""
-    try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", filepath],
-            capture_output=True, text=True, timeout=30)
-        dur = float(result.stdout.strip())
-        return dur if dur > 0 else 0.0
-    except Exception as e:
-        print("[ffprobe] duration check failed: {}".format(e), flush=True)
-        return 0.0
+def get_duration(filepath, retries=3):
+    """Get actual media duration in seconds using ffprobe.
+    Retries on 0.0 (file may not be fully flushed yet)."""
+    for attempt in range(1, retries + 1):
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+                capture_output=True, text=True, timeout=30)
+            dur = float(result.stdout.strip())
+            if dur > 0:
+                return dur
+            if attempt < retries:
+                print("[ffprobe] attempt {} returned 0.0, retrying...".format(attempt), flush=True)
+                time.sleep(2)
+        except Exception as e:
+            print("[ffprobe] duration check failed (attempt {}): {}".format(attempt, e), flush=True)
+            if attempt < retries:
+                time.sleep(2)
+    return 0.0
 
 
 def concat_parts(part_files, output):
-    """Concat multiple MP4/M4S files into one using concat demuxer."""
+    """Concat multiple MP4 files into one using concat demuxer.
+    Writes to temp file first, then atomically replaces output
+    to avoid reading+writing the same file (data corruption)."""
     list_file = "/tmp/concat_parts.txt"
     with open(list_file, "w") as f:
         for pf in part_files:
             f.write("file '{}'\n".format(pf))
     print("[concat] merging {} parts → {}".format(len(part_files), output), flush=True)
-    subprocess.run(
+    temp_out = output + ".tmpconcat"
+    result = subprocess.run(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-         "-i", list_file, "-c", "copy", "-movflags", "+faststart", output],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+         "-i", list_file, "-c", "copy", "-movflags", "+faststart", temp_out],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     os.remove(list_file)
+    if result.returncode != 0:
+        stderr_tail = result.stderr.strip().split("\n")[-10:] if result.stderr else ["(no stderr)"]
+        print("[concat] FAILED (rc={}): {}".format(result.returncode, "\n".join(stderr_tail)), flush=True)
+        if os.path.isfile(temp_out):
+            os.remove(temp_out)
+        raise RuntimeError("Concat failed with exit code {}".format(result.returncode))
+    # Atomic replace: original OUT file is not touched until concat succeeds
+    os.replace(temp_out, output)
+    print("[concat] done → {}".format(output), flush=True)
 
 
 dl = duration_label(DURATION)
@@ -364,24 +384,45 @@ def main():
             # Cooldown + fresh token
             time.sleep(30)
 
+            # Generate fresh URL for resume (with CHUNK_URL fallback)
+            resume_url = None
             try:
                 resume_url = regenerate_fresh_url()
                 print("[resume] Fresh chunklist: {}".format(resume_url[:100]), flush=True)
             except Exception as e:
                 print("[resume] Token refresh failed: {}".format(e), flush=True)
-                # Try CHUNK_URL if available
                 if CHUNK_URL:
                     resume_url = CHUNK_URL
                     print("[resume] Falling back to original CHUNK_URL", flush=True)
-                else:
-                    break
+
+            if not resume_url:
+                print("[resume] No URL available, stopping resume", flush=True)
+                break
 
             part_file = "{}.p{}.mp4".format(OUT[:-4], part_idx)
 
-            # For resume, don't update rec_start (progress bar stays on primary)
-            ok, had_403 = run_ffmpeg(resume_url, "resume-{}".format(part_idx), part_file, int(remaining))
+            # Resume with 403 retry (same pattern as primary recording)
+            RESUME_RETRIES = 2
+            part_ok = False
+            for rtry in range(1, RESUME_RETRIES + 1):
+                ok, had_403 = run_ffmpeg(resume_url, "resume-{}".format(part_idx), part_file, int(remaining))
+                if ok:
+                    part_ok = True
+                    break
+                if had_403 and rtry < RESUME_RETRIES:
+                    print("[resume] 403 at resume part {}, regenerating...".format(part_idx), flush=True)
+                    time.sleep(30)
+                    try:
+                        resume_url = regenerate_fresh_url()
+                    except Exception:
+                        if CHUNK_URL:
+                            resume_url = CHUNK_URL
+                        else:
+                            break
+                else:
+                    break
 
-            if not ok:
+            if not part_ok:
                 print("[resume] Part {} failed, stopping resume".format(part_idx), flush=True)
                 if os.path.isfile(part_file) and os.path.getsize(part_file) > 0:
                     # Partial file might still be useful
