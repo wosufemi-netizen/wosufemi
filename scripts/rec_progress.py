@@ -93,6 +93,34 @@ def duration_label(sec):
     return "{}s".format(sec)
 
 
+def get_duration(filepath):
+    """Get actual media duration in seconds using ffprobe."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+            capture_output=True, text=True, timeout=30)
+        dur = float(result.stdout.strip())
+        return dur if dur > 0 else 0.0
+    except Exception as e:
+        print("[ffprobe] duration check failed: {}".format(e), flush=True)
+        return 0.0
+
+
+def concat_parts(part_files, output):
+    """Concat multiple MP4/M4S files into one using concat demuxer."""
+    list_file = "/tmp/concat_parts.txt"
+    with open(list_file, "w") as f:
+        for pf in part_files:
+            f.write("file '{}'\n".format(pf))
+    print("[concat] merging {} parts → {}".format(len(part_files), output), flush=True)
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+         "-i", list_file, "-c", "copy", "-movflags", "+faststart", output],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    os.remove(list_file)
+
+
 dl = duration_label(DURATION)
 now = time.strftime("%Y-%m-%d_%H-%M-%S")
 OUT = "Wosufemi-Asset-{}-{}.mp4".format(now, dl)
@@ -100,10 +128,12 @@ HEADERS = os.environ.get("HEADERS",
     "Referer: https://20.detik.com/\r\nOrigin: https://20.detik.com")
 
 
-def build_ffmpeg_cmd(url, output):
+def build_ffmpeg_cmd(url, output, duration=None):
+    if duration is None:
+        duration = DURATION
     return ["ffmpeg", "-y",
         "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "-headers", HEADERS, "-i", url, "-t", str(DURATION),
+        "-headers", HEADERS, "-i", url, "-t", str(duration),
         "-c", "copy", "-movflags", "+faststart",
         "-progress", PROGRESS_FILE, output]
 
@@ -193,9 +223,14 @@ def monitor_progress():
             print("[progress] {}% ({}/{})".format(last_pct, fmt_time(current_sec), fmt_time(DURATION)), flush=True)
 
 
-def run_ffmpeg(url, label):
+def run_ffmpeg(url, label, output=None, duration=None):
+    """Run ffmpeg. Returns (success: bool, had_403: bool)."""
     global rec_start
-    cmd = build_ffmpeg_cmd(url, OUT)
+    if output is None:
+        output = OUT
+    if duration is None:
+        duration = DURATION
+    cmd = build_ffmpeg_cmd(url, output, duration)
     print("[ffmpeg] {} - {}".format(label, " ".join(cmd[:8])), flush=True)
     try:
         if os.path.exists(PROGRESS_FILE):
@@ -222,7 +257,7 @@ def run_ffmpeg(url, label):
     had_403 = "403" in stderr_text and "Forbidden" in stderr_text
     if had_403:
         print("[ffmpeg] 403 Forbidden detected in stderr", flush=True)
-    success = proc.returncode == 0 and os.path.isfile(OUT) and os.path.getsize(OUT) > 0
+    success = proc.returncode == 0 and os.path.isfile(output) and os.path.getsize(output) > 0
     return success, had_403
 
 
@@ -275,8 +310,12 @@ def main():
     mon = threading.Thread(target=monitor_progress, daemon=True)
     mon.start()
 
+    final_file = OUT
+    all_parts = []
     success = False
+
     try:
+        # ── Phase 1: Primary recording with 403 retry ──
         MAX_RETRIES = 3
         current_url = M3U8_URL
         for attempt in range(1, MAX_RETRIES + 1):
@@ -300,6 +339,87 @@ def main():
                 break
             else:
                 break
+
+        if not success:
+            # Recording failed entirely
+            raise RuntimeError("Primary recording failed after retries")
+
+        # ── Phase 2: Check if recording is shorter than requested ──
+        actual_dur = get_duration(OUT)
+        all_parts.append(OUT)
+        total_dur = actual_dur
+
+        print("[check] Actual duration: {:.1f}s / {}s requested".format(actual_dur, DURATION), flush=True)
+
+        MISS_TOLERANCE = 10  # seconds — less than this is "close enough"
+        RESUME_MAX_PARTS = 5
+
+        part_idx = 1
+        while total_dur < DURATION - MISS_TOLERANCE and part_idx <= RESUME_MAX_PARTS:
+            remaining = DURATION - total_dur
+            print("[resume] Short by {:.0f}s, part {}/{}...".format(remaining, part_idx, RESUME_MAX_PARTS), flush=True)
+            tg_edit("\u26a0\ufe0f Stream terputus di {}\n\u23f3 Melanjutkan rekaman...\n(terekam {}/{})".format(
+                fmt_time(int(total_dur)), fmt_time(int(total_dur)), fmt_time(DURATION)))
+
+            # Cooldown + fresh token
+            time.sleep(30)
+
+            try:
+                resume_url = regenerate_fresh_url()
+                print("[resume] Fresh chunklist: {}".format(resume_url[:100]), flush=True)
+            except Exception as e:
+                print("[resume] Token refresh failed: {}".format(e), flush=True)
+                # Try CHUNK_URL if available
+                if CHUNK_URL:
+                    resume_url = CHUNK_URL
+                    print("[resume] Falling back to original CHUNK_URL", flush=True)
+                else:
+                    break
+
+            part_file = "{}.p{}.mp4".format(OUT[:-4], part_idx)
+
+            # For resume, don't update rec_start (progress bar stays on primary)
+            ok, had_403 = run_ffmpeg(resume_url, "resume-{}".format(part_idx), part_file, int(remaining))
+
+            if not ok:
+                print("[resume] Part {} failed, stopping resume".format(part_idx), flush=True)
+                if os.path.isfile(part_file) and os.path.getsize(part_file) > 0:
+                    # Partial file might still be useful
+                    part_dur = get_duration(part_file)
+                    if part_dur > 0:
+                        all_parts.append(part_file)
+                        total_dur += part_dur
+                        print("[resume] Partial part {}: {:.1f}s".format(part_idx, part_dur), flush=True)
+                break
+
+            part_dur = get_duration(part_file)
+            if part_dur <= 0:
+                print("[resume] Part {} has zero duration, stopping".format(part_idx), flush=True)
+                os.remove(part_file)
+                break
+
+            all_parts.append(part_file)
+            total_dur += part_dur
+            print("[resume] Part {}: {:.1f}s → total {:.1f}s".format(part_idx, part_dur, total_dur), flush=True)
+            part_idx += 1
+
+        # ── Phase 3: Concat if multiple parts ──
+        if len(all_parts) > 1:
+            concat_parts(all_parts, OUT)
+            # Clean up part files
+            for pf in all_parts[1:]:
+                try:
+                    os.remove(pf)
+                except Exception:
+                    pass
+            final_file = OUT
+            # Re-check duration after concat
+            actual_dur = get_duration(OUT)
+            print("[concat] Merged {} parts → {:.1f}s".format(len(all_parts), actual_dur), flush=True)
+
+    except Exception as e:
+        print("[fatal] {}".format(e), flush=True)
+        success = False
     finally:
         ffmpeg_done.set()
         mon.join(timeout=10)
@@ -307,19 +427,21 @@ def main():
     gh_out = os.environ.get("GITHUB_OUTPUT", "")
     gh_env = os.environ.get("GITHUB_ENV", "")
 
-    if success and os.path.isfile(OUT) and os.path.getsize(OUT) > 0:
-        fsize = os.path.getsize(OUT)
+    if success and os.path.isfile(final_file) and os.path.getsize(final_file) > 0:
+        fsize = os.path.getsize(final_file)
         size_str = "{:.1f} MB".format(fsize / (1024 * 1024)) if fsize > 1024 * 1024 else "{:.0f} kB".format(fsize / 1024)
-        print("\u2705 Recorded: {} ({})".format(OUT, size_str), flush=True)
+        actual_dur = get_duration(final_file)
+        dur_str = fmt_time(int(actual_dur)) if actual_dur > 0 else fmt_time(DURATION)
+        print("\u2705 Recorded: {} ({}) actual={}".format(final_file, size_str, dur_str), flush=True)
         if gh_out:
             with open(gh_out, "a") as f:
-                f.write("recorded=true\noutput={}\n".format(OUT))
+                f.write("recorded=true\noutput={}\n".format(final_file))
         if gh_env:
             with open(gh_env, "a") as f:
                 f.write("ORIG_BYTES={}\nFILE_SIZE={}\n".format(fsize, size_str))
         tg_edit("\u2705 <b>Rekaman selesai!</b>\n\n{}\u23f1 Durasi: {}\n\U0001f4c1 <code>{}</code>\n\n\u23f3 Proses selanjutnya...".format(
             "\U0001f4e6 Size: {}\n".format(size_str) if size_str else "",
-            fmt_time(DURATION), OUT))
+            dur_str, os.path.basename(final_file)))
     else:
         if gh_out:
             with open(gh_out, "a") as f:
