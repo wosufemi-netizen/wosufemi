@@ -475,8 +475,8 @@ function escapeHtml(s) {
 async function handleVerify(env, chatId, text) {
   const parts = text.split(/s+/).filter(Boolean);
   if (parts.length < 2) {
-    await tgSend(env, chatId, "Format: <code>/verify &lt;release_tag&gt;</code>
-Atau: <code>/verify list</code> untuk daftar rekaman + hash");
+    await tgSend(env, chatId, `Format: <code>/verify &lt;release_tag&gt;</code>
+Atau: <code>/verify list</code> untuk daftar rekaman + hash`);
     return;
   }
 
@@ -519,8 +519,7 @@ Atau: <code>/verify list</code> untuk daftar rekaman + hash");
 
     // Parse metadata
     const meta = {};
-    for (const line of txtContent.split("
-")) {
+    for (const line of txtContent.split("\n")) {
       const trimmed = line.trim();
       if (trimmed && !trimmed.startsWith("#") && trimmed.includes(":")) {
         const [k, ...v] = trimmed.split(":");
@@ -547,8 +546,7 @@ Atau: <code>/verify list</code> untuk daftar rekaman + hash");
       shaHevc !== "N/A" && shaHevc.length > 32 ? `<code>${shaHevc.substring(32)}</code>` : "",
       "",
       "💡 Bandingkan hash di atas dengan file yang kamu download.",
-    ].filter(Boolean).join("
-");
+    ].filter(Boolean).join("\n");
 
     await tgSend(env, chatId, msg);
   } catch (e) {
@@ -575,10 +573,8 @@ async function handleVerifyList(env, chatId) {
       lines.push("");
     }
     lines.push("Gunakan: <code>/verify &lt;tag&gt;</code> untuk lihat hash");
-    await tgSend(env, chatId, lines.join("
-"));
+    await tgSend(env, chatId, lines.join("\n"));
   } catch (e) {
     await tgSend(env, chatId, `❌ Error: ${escapeHtml(String(e.message || e))}`);
   }
-}
 }
